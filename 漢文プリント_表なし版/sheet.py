@@ -24,11 +24,11 @@ M_TOP, M_BOT, M_LR = 850, 794, 907
 TEXT_W = PG_W - 2 * M_LR           # 15024
 TEXT_H = PG_H - M_TOP - M_BOT      # 10262
 
-BAND_TOP = 3400                    # 訓読文 band, 60mm
+BAND_TOP = 3175                    # 訓読文 band, 56mm
 BAND_GAP = 284                     # 5mm
-BAND_BOT = TEXT_H - BAND_TOP - BAND_GAP    # 書き下し / 訳 band, 116mm
+BAND_BOT = TEXT_H - BAND_TOP - BAND_GAP    # 書き下し / 訳 band, 124mm
 
-PITCH_HEAD = 620
+PITCH_HEAD = 560
 PITCH_ASIDE = 340
 PITCH_BODY_MIN, PITCH_BODY_MAX = 700, 1800
 
@@ -39,13 +39,14 @@ PITCH_BODY_MIN, PITCH_BODY_MAX = 700, 1800
 # strip of white at the left edge but never pushes text onto a second page.
 FILL = 0.80
 
-BORDER_SPACE = 3                       # points kept clear inside a frame
+FRAME_PAD = 110                        # twips of air between text and frame
+FRAME_GAP = 50                         # twips left clear between two frames
 
 # Each section's first and last line come out a little wider than the exact
 # pitch asks for (measured: about 7pt at each end, with or without a frame),
 # and there are three sections on a sheet. Hold that much back so the sheet
 # still fits on one page.
-SLACK = 1500                           # twips
+SLACK = 700                            # twips
 
 
 def sectpr(cols=1, uneven=False, continuous=True, nextpage=False):
@@ -71,11 +72,9 @@ def sectpr(cols=1, uneven=False, continuous=True, nextpage=False):
     return sp
 
 
-def para(body, pitch, before=0, colbreak=False, box=None):
+def para(body, pitch, before=0, colbreak=False):
     p = sub(body, 'p')
     pr = sub(p, 'pPr')
-    if box:
-        pr.append(border(*box))
     pr.append(el('snapToGrid', val=0))
     sp = el('spacing', before=before, after=0, line=pitch, lineRule='exact')
     pr.append(sp)
@@ -85,40 +84,17 @@ def para(body, pitch, before=0, colbreak=False, box=None):
     return p
 
 
-def border(color, first, last, space=BORDER_SPACE, sz=6):
-    """One side of a frame drawn around a block of paragraphs.
-
-    In vertical writing a paragraph's "top" and "bottom" borders run along the
-    top and the bottom of the column, so putting them on every paragraph draws
-    the long sides of the box; "left" and "right" are the short ends, so they
-    go only on the first and the last paragraph of the block. Built this way
-    the frame needs no coordinates at all -- and a floating shape could not be
-    placed reliably anyway, because in vertical writing its own coordinate
-    frame is rotated.
-    """
-    bd = el('pBdr')
-    sides = ['top', 'bottom']
-    if first:
-        sides.append('left')
-    if last:
-        sides.append('right')
-    for side in ('top', 'left', 'bottom', 'right'):
-        if side in sides:
-            bd.append(el(side, val='single', sz=sz, space=space, color=color))
-    return bd
-
-
-def line(body, markup, pitch, style, answers=True, colbreak=False, box=None):
-    p = para(body, pitch, colbreak=colbreak, box=box)
+def line(body, markup, pitch, style, answers=True, colbreak=False):
+    p = para(body, pitch, colbreak=colbreak)
     X.emit(p, markup, style, show_answers=answers)
     return p
 
 
-def ruled(body, pitch, length, colbreak=False, box=None):
-    """an empty writing line with a faint rule along it"""
-    p = para(body, pitch, colbreak=colbreak, box=box)
-    X.run(p, '　' * length, font=X.TEXT, size=10.5,
-          color=X.INK, underline=X.RULE)
+def ruled(body, pitch, size, colbreak=False):
+    """an empty writing line, ruled the full depth of the band"""
+    p = para(body, pitch, colbreak=colbreak)
+    n = max(1, int(BAND_BOT // (size * 20)))
+    X.run(p, '　' * n, font=X.TEXT, size=size, color=X.INK, underline=X.RULE)
     return p
 
 
@@ -134,62 +110,97 @@ def end_section(body, **kw):
 FRAME = '8FA3C4'                   # the colour the decorative frames are drawn in
 
 
+def fits(markup, size_pt, height):
+    """does this line stay inside its band, or will it wrap?"""
+    return X.advance(markup) * size_pt * 20 <= height
+
+
 def n_lines(markup, size_pt, height=TEXT_H):
     """how many vertical lines a paragraph takes in a column of `height`"""
     per = max(1, int(height // (size_pt * 20) * FILL))
-    return max(1, -(-len(X.plain(markup)) // per))
+    return max(1, -(-int(X.advance(markup)) // per))
 
 
-def build_sheet(body, sheet, answers, first_of_document):
-    """one printed side"""
-    aside = [(t, s, True) for t, s in sheet['questions']]
-    aside += [(t, s, False) for t, s in sheet['notes']]
-    aside_lines = sum(n_lines(t, s) for t, s, _ in aside)
+def block_geometry(sheet):
+    """where each block sits, in twips from the left edge of the paper
 
+    How many lines the questions and the notes take can only be estimated
+    until the text is laid out, so `sheet['lines']` may carry the counts
+    measured from a first rendering; then the blocks fill the paper exactly.
+    """
+    if sheet.get('lines'):
+        q_lines, note_lines = sheet['lines']
+        aside_lines = q_lines + note_lines
+    else:
+        q_lines = sum(n_lines(t, sz) for t, sz in sheet['questions'])
+        aside_lines = q_lines + sum(n_lines(t, sz) for t, sz in sheet['notes'])
     w_head = len(sheet['head']) * PITCH_HEAD
-    w_aside = aside_lines * PITCH_ASIDE
-    # the poem spreads out to fill whatever the headings and the notes leave,
-    # so four lines never sit in a corner with the rest of the sheet empty
     avail = TEXT_W - w_head - SLACK
-    pitch_body = (avail - w_aside) // max(1, len(sheet['upper']))
+    pitch_body = (avail - aside_lines * PITCH_ASIDE) // max(1, len(sheet['upper']))
     pitch_body = max(PITCH_BODY_MIN, min(PITCH_BODY_MAX, pitch_body))
+    w_body = pitch_body * len(sheet['upper'])
+    right = PG_W - M_LR
+    x_body = right - w_head - w_body
+    x_q = x_body - q_lines * PITCH_ASIDE
+    x_note = x_q - (aside_lines - q_lines) * PITCH_ASIDE
+    return dict(pitch_body=pitch_body, x_body=x_body, w_body=w_body,
+                x_q=x_q, x_note=x_note)
 
-    # ---- 見出し・指示文・記名（枠なし）
+
+def build_sheet(body, sheet, answers, first_of_document, frames=True):
+    """one printed side"""
+    aside = [(t, sz, True) for t, sz in sheet['questions']]
+    aside += [(t, sz, False) for t, sz in sheet['notes']]
+    g = dict(block_geometry(sheet))
+    g.update(sheet.get('frame_x') or {})     # measured edges, when we have them
+    pitch_body = g['pitch_body']
+
+    # ---- 見出し・指示文・記名
+    first = None
     for markup, size, bold in sheet['head']:
         p = para(body, PITCH_HEAD)
         X.emit(p, markup, dict(font=X.TEXT, size=size, bold=bold,
                                color=X.INDIGO if bold else X.INK),
                show_answers=answers)
+        if first is None:
+            first = p
+    if frames:
+        # 語注 | 設問 | 本文 sit side by side; pad the outer edges only, and
+        # leave a hairline gap where two frames meet so they do not overlap
+        top, height = M_TOP - FRAME_PAD, TEXT_H + 2 * FRAME_PAD
+        cuts = [g['x_note'] - FRAME_PAD, g['x_q'], g['x_body'],
+                g['x_body'] + g['w_body'] + FRAME_PAD]
+        for i in range(3):
+            lo = cuts[i] + (FRAME_GAP if i else 0)
+            hi = cuts[i + 1] - (FRAME_GAP if i < 2 else 0)
+            X.shape(first, lo, top, hi - lo, height, i + 1)
     end_section(body, cols=1, nextpage=not first_of_document)
 
     # ---- 本文: 訓読文（上段） / 書き下し・訳（下段）
-    n = len(sheet['upper'])
-    for i, markup in enumerate(sheet['upper']):
+    for markup in sheet['upper']:
+        if not fits(markup, sheet['upper_size'], BAND_TOP):
+            print('  ! 上段からはみ出します（折り返します）:', X.plain(markup))
         line(body, markup, pitch_body,
-             dict(font=X.BRUSH, size=11.5, color=X.INK), answers,
-             box=(FRAME, i == 0, i == n - 1))
-    n = len(sheet['lower'])
+             dict(font=X.BRUSH, size=sheet['upper_size'], color=X.INK), answers)
     for i, markup in enumerate(sheet['lower']):
-        box = (FRAME, i == 0, i == n - 1)
-        if markup is None:
-            para(body, pitch_body, colbreak=(i == 0), box=box)
-        elif answers:
-            line(body, markup, pitch_body,
-                 dict(font=X.TEXT, size=10.5, color=X.RED), True,
-                 colbreak=(i == 0), box=box)
+        if markup is not None and not fits(markup, sheet['lower_size'], BAND_BOT):
+            print('  ! 下段からはみ出します（折り返します）:', X.plain(markup)[:20])
+        if answers:
+            if markup is None:
+                para(body, pitch_body, colbreak=(i == 0))
+            else:
+                line(body, markup, pitch_body,
+                     dict(font=X.TEXT, size=sheet['lower_size'], color=X.RED),
+                     True, colbreak=(i == 0))
         else:
-            ruled(body, pitch_body, sheet['rule_len'],
-                  colbreak=(i == 0), box=box)
+            # every row gets a rule, including the one beside the poet's name
+            ruled(body, pitch_body, sheet['lower_size'], colbreak=(i == 0))
     end_section(body, uneven=True)
 
-    # ---- 設問 → 語注（右から左へ、それぞれ枠で囲む）
-    nq = len(sheet['questions'])
-    for i, (markup, size, is_q) in enumerate(aside):
-        j = i if is_q else i - nq
-        last = (nq - 1) if is_q else (len(aside) - nq - 1)
+    # ---- 設問 → 語注（右から左へ）
+    for markup, size, _ in aside:
         line(body, markup, PITCH_ASIDE,
-             dict(font=X.TEXT, size=size, color=X.INK), answers,
-             box=(FRAME, j == 0, j == last))
+             dict(font=X.TEXT, size=size, color=X.INK), answers)
     return pitch_body
 
 
@@ -233,11 +244,12 @@ SETTINGS = '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 </w:settings>'''
 
 
-def write(sheets, path, answers):
+def write(sheets, path, answers, frames=True):
     doc = X.document()
     body = sub(doc, 'body')
     for i, sh in enumerate(sheets):
-        build_sheet(body, sh, answers, first_of_document=(i == 0))
+        build_sheet(body, sh, answers, first_of_document=(i == 0),
+                    frames=frames)
         if i < len(sheets) - 1:
             end_section(body, cols=1)
     body.append(sectpr(cols=1))
