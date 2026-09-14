@@ -37,6 +37,26 @@ FONT_FIXES = {
 # near-blacks that crept in from hand-editing, unified to one ink colour
 INK_ALIASES = {'000000', '262626', '2B2B26'}
 
+A = '{http://schemas.openxmlformats.org/drawingml/2006/main}'
+V = '{urn:schemas-microsoft-com:vml}'
+
+
+def drop_pictures(root):
+    """Remove the photographs and illustrations, keeping the drawn shapes.
+
+    The scrolls and rounded frames are part of the sheet's design and belong
+    to every lesson; the portraits and the four-panel strip belong to one
+    text, so a new lesson must not inherit them.
+    """
+    W = T.W
+    gone = 0
+    for r in list(root.iter(W + 'r')):
+        if (r.find('.//' + A + 'blip') is not None
+                or r.find('.//' + V + 'imagedata') is not None):
+            r.getparent().remove(r)
+            gone += 1
+    return gone
+
 
 def load_content(path):
     ns = {}
@@ -70,6 +90,8 @@ def build(content_path, show_answers, out_path):
         parts = {n: z.read(n) for n in z.namelist()}
     root = etree.fromstring(parts[DOC_PART])
     normalise(root)
+    if data.get('ART', 'shapes') == 'shapes':
+        drop_pictures(root)
 
     slots = T.build_slots(root)
     missing = [k for k in slots_text if k not in slots]

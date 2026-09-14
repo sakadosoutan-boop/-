@@ -104,13 +104,16 @@ def _merge(s):
 def probe(tc, fallback=None):
     """Collect the run properties this slot already uses, so refilled text
     keeps the same look. Returns dict of deep-copied <w:rPr> templates."""
-    prof = {'base': None, 'rt': None, 'kaeri': None, 'pPr': None}
+    prof = {'base': None, 'rt': None, 'kaeri': None, 'pPr': None, 'rubyPr': None}
     p0 = tc.find(W + 'p')
     if p0 is not None and p0.find(W + 'pPr') is not None:
         prof['pPr'] = deepcopy(p0.find(W + 'pPr'))
     # The base style is the one most of the slot's text is set in -- not
     # simply the first run, which is often a heading term (#...#) styled
     # differently from the body it introduces.
+    rpr0 = tc.find('.//' + W + 'rubyPr')
+    if rpr0 is not None:
+        prof['rubyPr'] = deepcopy(rpr0)
     weights = {}
     for r in tc.iter(W + 'r'):
         rPr = r.find(W + 'rPr')
@@ -125,6 +128,8 @@ def probe(tc, fallback=None):
             if prof['rt'] is None:
                 prof['rt'] = deepcopy(rPr)
         elif rPr.find(W + 'rFonts') is not None:
+            if _is_squeezed(rPr):
+                continue          # 縦中横 / scaled run: never the body style
             n = len(''.join(t.text or '' for t in r.iter(W + 't')))
             bucket = 'answer' if _is_answer_red(rPr) else 'body'
             entry = weights.setdefault((bucket, _signature(rPr)), [0, rPr])
@@ -132,7 +137,7 @@ def probe(tc, fallback=None):
     body = {k: v for k, v in weights.items() if k[0] == 'body'}
     pick = body or weights
     if pick:
-        base = deepcopy(max(pick.values(), key=lambda e: e[0])[1])
+        base = deepcopy(_dominant(pick)[1])
         # red and bold are carried by the markup (《…》 / *…*), never by the
         # slot's default, or a mostly-red slot would come back all red and
         # the student edition would have nothing left to blank out.
@@ -144,12 +149,58 @@ def probe(tc, fallback=None):
         bcs = base.find(W + 'bCs')
         if bcs is not None:
             base.remove(bcs)
+        _unsqueeze(base)
         prof['base'] = base
     if fallback:
         for k in prof:
             if prof[k] is None:
                 prof[k] = deepcopy(fallback[k]) if fallback.get(k) is not None else None
     return prof
+
+
+def _is_squeezed(rPr):
+    """True for a run that is horizontally scaled or set 縦中横.
+
+    A kuho note prints "マスターＰ186" with the numerals rotated upright and
+    squeezed (w:eastAsianLayout / w:w 42%). Such a run must never be taken as
+    the slot's body style, or every character refilled into that slot comes
+    out at 42% width.
+    """
+    if rPr.find(W + 'eastAsianLayout') is not None:
+        return True
+    wel = rPr.find(W + 'w')
+    return wel is not None and (wel.get(W + 'val') or '100') != '100'
+
+
+def _unsqueeze(rPr):
+    for tag in ('w', 'eastAsianLayout', 'fitText'):
+        el = rPr.find(W + tag)
+        if el is not None:
+            rPr.remove(el)
+
+
+def _dominant(candidates):
+    """Pick the slot's body style out of the styles its runs use.
+
+    Not simply the heaviest one: a kuho note sets its 返り点 and 送り仮名 as
+    ordinary small runs, and there can be more of those characters than of
+    the sentence they annotate. Take the largest size that still carries a
+    real share of the text, so refilled text is set in the body size rather
+    than in the annotation size.
+    """
+    total = sum(e[0] for e in candidates.values()) or 1
+    by_size = {}
+    for (bucket, sig), entry in candidates.items():
+        sz = int(sig[1]) if sig[1] else 0
+        cur = by_size.get(sz)
+        if cur is None or entry[0] > cur[0]:
+            by_size[sz] = entry
+        else:
+            by_size[sz] = [cur[0] + entry[0], cur[1]]
+    real = [(sz, e) for sz, e in by_size.items() if e[0] >= total * 0.25]
+    if real:
+        return max(real, key=lambda kv: kv[0])[1]
+    return max(candidates.values(), key=lambda e: e[0])
 
 
 def _is_answer_red(rPr):
@@ -354,21 +405,33 @@ def _add_ruby(p, base, rt, prof, red, bold, term, show_answers):
             outer.remove(el)
     r.append(outer)
     ruby = etree.SubElement(r, W + 'ruby')
-    pr = etree.SubElement(ruby, W + 'rubyPr')
-    align = etree.SubElement(pr, W + 'rubyAlign')
+    if prof.get('rubyPr') is not None:
+        # the slot already prints furigana; keep its exact sizing
+        pr = deepcopy(prof['rubyPr'])
+        ruby.append(pr)
+        align = pr.find(W + 'rubyAlign')
+        if align is None:
+            align = etree.Element(W + 'rubyAlign')
+            pr.insert(0, align)
+        hps = _hps_of(prof)
+    else:
+        pr = etree.SubElement(ruby, W + 'rubyPr')
+        align = etree.SubElement(pr, W + 'rubyAlign')
+        base_hp = _size_of(prof.get('base')) or 20
+        hps = max(8, round(base_hp * 0.45))
+        for tag, val in (('hps', hps), ('hpsRaise', base_hp), ('hpsBaseText', base_hp)):
+            e = etree.SubElement(pr, W + tag)
+            e.set(W + 'val', str(int(val)))
+        lid = etree.SubElement(pr, W + 'lid')
+        lid.set(W + 'val', 'ja-JP')
     align.set(W + 'val', 'distributeSpace' if len(rt) <= len(base) else 'distributeLetter')
-    base_hp = _size_of(prof.get('base')) or 20
-    rt_hp = _size_of(prof.get('rt')) or max(8, round(base_hp * 0.45))
-    for tag, val in (('hps', rt_hp), ('hpsRaise', base_hp), ('hpsBaseText', base_hp)):
-        e = etree.SubElement(pr, W + tag)
-        e.set(W + 'val', str(int(val)))
-    lid = etree.SubElement(pr, W + 'lid')
-    lid.set(W + 'val', 'ja-JP')
     rt_el = etree.SubElement(ruby, W + 'rt')
     rr = etree.SubElement(rt_el, W + 'r')
     # furigana follows the base's answer colouring, so a red kakikudashi
     # line reads as one red block rather than red text with grey readings
-    rr.append(_rpr(prof, 'rt', red=red))
+    rt_rpr = _rpr(prof, 'rt', red=red)
+    _force_size(rt_rpr, hps)
+    rr.append(rt_rpr)
     rtt = etree.SubElement(rr, W + 't')
     rtt.text = rt
     base_el = etree.SubElement(ruby, W + 'rubyBase')
@@ -376,6 +439,35 @@ def _add_ruby(p, base, rt, prof, red, bold, term, show_answers):
     br.append(_rpr(prof, 'base', red, bold, term))
     bt = etree.SubElement(br, W + 't')
     bt.text = base
+
+
+def _hps_of(prof):
+    pr = prof.get('rubyPr')
+    if pr is None:
+        return None
+    e = pr.find(W + 'hps')
+    return int(e.get(W + 'val')) if e is not None else None
+
+
+# CT_RPr child order up to w:sz -- anything listed here precedes it
+_BEFORE_SZ = ['rStyle', 'rFonts', 'b', 'bCs', 'i', 'iCs', 'caps', 'smallCaps',
+              'strike', 'dstrike', 'outline', 'shadow', 'emboss', 'imprint',
+              'noProof', 'snapToGrid', 'vanish', 'webHidden', 'color',
+              'spacing', 'w', 'kern', 'position']
+
+
+def _force_size(rPr, val):
+    """Pin the run's point size, creating w:sz/w:szCs when the slot's runs
+    inherit their size from the style. Ruby that inherits the body size is
+    typeset full-height beside the base text instead of as furigana."""
+    if val is None:
+        return
+    for tag in ('sz', 'szCs'):
+        e = rPr.find(W + tag)
+        if e is None:
+            e = etree.Element(W + tag)
+            rPr.insert(_ins_at(rPr, _BEFORE_SZ + (['sz'] if tag == 'szCs' else [])), e)
+        e.set(W + 'val', str(int(val)))
 
 
 def _size_of(rPr):
