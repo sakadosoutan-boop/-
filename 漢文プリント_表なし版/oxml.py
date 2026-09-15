@@ -27,7 +27,7 @@ RUBY_SEP = '｜'
 INK = '1A1A1A'
 RED = 'EE0000'
 INDIGO = '1B3A6B'
-RULE = 'B9C4D6'          # the faint guide line students write along
+RULE = 'A3B4CC'          # the faint guide line students write along
 FRAME = '8FA3C4'         # the decorative frames
 PAGE_W = 16838           # A4 landscape, twips -- needed to place a frame
 
@@ -167,6 +167,7 @@ def ruby(p, base, reading, **style):
     rr = sub(rt, 'r')
     st = dict(style)
     st['size'] = hps / 2.0
+    st.pop('underline', None)      # a writing rule must not cross the furigana
     rr.append(rpr(**st))
     t = sub(rr, 't')
     t.text = reading
@@ -257,7 +258,7 @@ def _blank_len(text):
     return max(2, min(n, 40))
 
 
-SMALL_RATIO = 0.72       # ~…~ runs, as a fraction of the base size
+SMALL_RATIO = 0.58       # ~…~ runs, as a fraction of the base size
 RUBY_RATIO = 0.45        # furigana size, as a fraction of the base size
 KAERI_RATIO = 0.62       # 返り点 size, likewise
 

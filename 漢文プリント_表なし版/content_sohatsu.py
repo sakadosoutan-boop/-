@@ -46,7 +46,7 @@ SHEETS = [
         'upper': KUNDOKU,
         'upper_size': 18,
         'lower': KAKIKUDASHI,
-        'lower_size': 16,
+        'lower_size': 13.5,
         'questions': [
             ('*一　詩形・訓点の確認*', 10.5),
             ('１　この詩の形式を漢字四字で答え、押韻している漢字を順に抜き出せ。'
@@ -80,12 +80,11 @@ SHEETS = [
         'head': [
             ('【古典探究】　李白「早発白帝城」　現代語訳プリント②　　『唐詩選』', 12, True),
             ('@二年　　組　　　番　氏名', 11, False),
-            ('書き下し文をもとに現代語訳を書け。上段の訓読文と対応する。', 11, False),
         ],
         'upper': KUNDOKU,
         'upper_size': 18,
         'lower': YAKU,
-        'lower_size': 10.5,
+        'lower_size': 9.5,
         'questions': [
             ('*二　内容を読み深める問い*', 10.5),
             ('１　この詩に用いられている色彩の対比と数字の対比を、それぞれ詩中の語で示せ。', 9),

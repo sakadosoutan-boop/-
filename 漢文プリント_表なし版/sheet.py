@@ -20,7 +20,9 @@ from oxml import W, el, sub, MM
 
 # ---------------------------------------------------------------- paper
 PG_W, PG_H = 16838, 11906          # A4 landscape, twips
-M_TOP, M_BOT, M_LR = 850, 794, 907
+# a deeper foot margin: a full line of notes used to finish flush against the
+# bottom edge, which reads as text spilling off the sheet
+M_TOP, M_BOT, M_LR = 850, 1020, 907
 TEXT_W = PG_W - 2 * M_LR           # 15024
 TEXT_H = PG_H - M_TOP - M_BOT      # 10262
 
@@ -32,7 +34,7 @@ BAND_BOT = TEXT_H - BAND_TOP - BAND_GAP    # 書き下し / 訳 band, 124mm
 # dialog reads the way a teacher expects. The space between lines of the poem
 # and between notes comes from 段落後の間隔 instead, which in vertical writing
 # opens a gap to the left of the paragraph.
-GAP_HEAD = 340                     # 段落後の間隔, twips (6mm)
+GAP_HEAD = 220                     # 段落後の間隔, twips (4mm)
 GAP_UPPER = 280                    # 訓読文 (5mm)
 GAP_ASIDE = 0                      # 語注・設問（refit が紙幅に合わせて広げる）
 GAP_ASIDE_MAX = 620
@@ -83,7 +85,12 @@ def sectpr(cols=1, uneven=False, continuous=True, nextpage=False):
     return sp
 
 
-def para(body, after=0, before=0, colbreak=False, bottom=False, tail=0):
+ASIDE_TAIL = 230                   # 4mm kept clear at the foot of a note
+BODY_TAIL = 170                    # 3mm, likewise for the poem and the answers
+
+
+def para(body, after=0, before=0, colbreak=False, bottom=False, tail=0,
+         rule=None):
     """One paragraph at the default 1-line spacing.
 
     `after` is 段落後の間隔 -- in vertical writing that is horizontal space to
@@ -92,6 +99,12 @@ def para(body, after=0, before=0, colbreak=False, bottom=False, tail=0):
     """
     p = sub(body, 'p')
     pr = sub(p, 'pPr')
+    if rule:
+        # in vertical writing a paragraph's bottom border runs alongside the
+        # line for its whole length -- exactly the rule to write on
+        bd = el('pBdr')
+        bd.append(el('bottom', val='single', sz=4, space=1, color=rule))
+        pr.append(bd)
     pr.append(el('snapToGrid', val=0))
     pr.append(el('spacing', before=before, after=after,
                  line=240, lineRule='auto'))
@@ -112,16 +125,18 @@ def line(body, markup, style, after=0, colbreak=False, answers=True, **kw):
 
 
 def ruled(body, markup, size, answers, after=0, colbreak=False):
-    """A writing line: the answer, then a faint rule filling the rest.
+    """A writing line: one rule down the whole band, with the answer on it.
 
-    Both editions get the same rule, so the answer key and the sheet the
-    students write on line up exactly.
+    The rule is an underline, which in vertical writing runs alongside the
+    column. The answer is underlined too, so the line is continuous whether
+    the answer is printed or not and the two editions match exactly.
     """
-    p = para(body, after=after, colbreak=colbreak)
-    room = max(1, int(BAND_BOT // (size * 20)) - 1)   # 1 spare so it never wraps
+    p = para(body, after=after, colbreak=colbreak, tail=BODY_TAIL)
+    room = max(1, int((BAND_BOT - BODY_TAIL) // (size * 20)) - 1)
     used = 0
     if answers and markup:
-        X.emit(p, markup, dict(font=X.TEXT, size=size, color=X.RED))
+        X.emit(p, markup, dict(font=X.TEXT, size=size, color=X.RED,
+                               underline=X.RULE))
         used = int(X.advance(markup) + 0.999)
     n = max(2, room - used)
     X.run(p, '　' * n, font=X.TEXT, size=size, color=X.INK, underline=X.RULE)
@@ -174,12 +189,14 @@ def build_sheet(body, sheet, answers, first_of_document, frames=True,
     # ---- 本文: 訓読文（上段、手を加えない） / 書き下し・訳（下段、罫線つき）
     pitch = int(sheet['upper_size'] * 20 * LINE_FACTOR) + GAP_UPPER
     for markup in sheet['upper']:
-        if not fits(markup, sheet['upper_size'], BAND_TOP):
+        if not fits(markup, sheet['upper_size'], BAND_TOP - BODY_TAIL):
             print('  ! 上段からはみ出します（折り返します）:', X.plain(markup))
         line(body, markup, dict(font=X.BRUSH, size=sheet['upper_size'],
-                                color=X.INK), after=GAP_UPPER, answers=answers)
+                                color=X.INK), after=GAP_UPPER, answers=answers,
+             tail=BODY_TAIL)
     for i, markup in enumerate(sheet['lower']):
-        if markup is not None and not fits(markup, sheet['lower_size'], BAND_BOT):
+        if markup is not None and not fits(markup, sheet['lower_size'],
+                                           BAND_BOT - BODY_TAIL):
             print('  ! 下段からはみ出します（折り返します）:', X.plain(markup)[:20])
         ruled(body, markup, sheet['lower_size'], answers,
               after=gap_for(sheet['lower_size'], pitch), colbreak=(i == 0))
@@ -188,7 +205,7 @@ def build_sheet(body, sheet, answers, first_of_document, frames=True,
     # ---- 設問 → 語注（右から左へ）
     for markup, size in sheet['questions'] + sheet['notes']:
         line(body, markup, dict(font=X.TEXT, size=size, color=X.INK),
-             after=gap_aside, answers=answers)
+             after=gap_aside, answers=answers, tail=ASIDE_TAIL)
 
 
 CT = '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
