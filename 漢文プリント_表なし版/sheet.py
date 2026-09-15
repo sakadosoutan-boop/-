@@ -24,13 +24,24 @@ M_TOP, M_BOT, M_LR = 850, 794, 907
 TEXT_W = PG_W - 2 * M_LR           # 15024
 TEXT_H = PG_H - M_TOP - M_BOT      # 10262
 
-BAND_TOP = 3175                    # 訓読文 band, 56mm
+BAND_TOP = 3402                    # 訓読文 band, 60mm
 BAND_GAP = 284                     # 5mm
 BAND_BOT = TEXT_H - BAND_TOP - BAND_GAP    # 書き下し / 訳 band, 124mm
 
-PITCH_HEAD = 560
-PITCH_ASIDE = 340
-PITCH_BODY_MIN, PITCH_BODY_MAX = 700, 1800
+# Line spacing is left at Word's default "1 行" everywhere, so the paragraph
+# dialog reads the way a teacher expects. The space between lines of the poem
+# and between notes comes from 段落後の間隔 instead, which in vertical writing
+# opens a gap to the left of the paragraph.
+GAP_HEAD = 340                     # 段落後の間隔, twips (6mm)
+GAP_UPPER = 280                    # 訓読文 (5mm)
+GAP_ASIDE = 0                      # 語注・設問（refit が紙幅に合わせて広げる）
+GAP_ASIDE_MAX = 620
+
+# Word's "1 行" leaves about this much room per line, measured from a rendered
+# sheet. Used to give the 書き下し the same line pitch as the 訓読文 above it,
+# so each answer sits under the line it belongs to even though the two are set
+# at different sizes.
+LINE_FACTOR = 1.45
 
 # How much of a column a paragraph really gets to use. Kinsoku pushes
 # characters onto the next line and the frame eats a little at each end, so a
@@ -72,28 +83,47 @@ def sectpr(cols=1, uneven=False, continuous=True, nextpage=False):
     return sp
 
 
-def para(body, pitch, before=0, colbreak=False):
+def para(body, after=0, before=0, colbreak=False, bottom=False, tail=0):
+    """One paragraph at the default 1-line spacing.
+
+    `after` is 段落後の間隔 -- in vertical writing that is horizontal space to
+    the left of this line. `bottom` sets 下詰め and `tail` keeps that much of
+    the column free below the text.
+    """
     p = sub(body, 'p')
     pr = sub(p, 'pPr')
     pr.append(el('snapToGrid', val=0))
-    sp = el('spacing', before=before, after=0, line=pitch, lineRule='exact')
-    pr.append(sp)
+    pr.append(el('spacing', before=before, after=after,
+                 line=240, lineRule='auto'))
+    if tail:
+        pr.append(el('ind', right=tail))
+    if bottom:
+        pr.append(el('jc', val='right'))       # 縦書きでは「下詰め」
     if colbreak:
         r = sub(p, 'r')
         sub(r, 'br', type='column')
     return p
 
 
-def line(body, markup, pitch, style, answers=True, colbreak=False):
-    p = para(body, pitch, colbreak=colbreak)
+def line(body, markup, style, after=0, colbreak=False, answers=True, **kw):
+    p = para(body, after=after, colbreak=colbreak, **kw)
     X.emit(p, markup, style, show_answers=answers)
     return p
 
 
-def ruled(body, pitch, size, colbreak=False):
-    """an empty writing line, ruled the full depth of the band"""
-    p = para(body, pitch, colbreak=colbreak)
-    n = max(1, int(BAND_BOT // (size * 20)))
+def ruled(body, markup, size, answers, after=0, colbreak=False):
+    """A writing line: the answer, then a faint rule filling the rest.
+
+    Both editions get the same rule, so the answer key and the sheet the
+    students write on line up exactly.
+    """
+    p = para(body, after=after, colbreak=colbreak)
+    room = max(1, int(BAND_BOT // (size * 20)) - 1)   # 1 spare so it never wraps
+    used = 0
+    if answers and markup:
+        X.emit(p, markup, dict(font=X.TEXT, size=size, color=X.RED))
+        used = int(X.advance(markup) + 0.999)
+    n = max(2, room - used)
     X.run(p, '　' * n, font=X.TEXT, size=size, color=X.INK, underline=X.RULE)
     return p
 
@@ -110,98 +140,55 @@ def end_section(body, **kw):
 FRAME = '8FA3C4'                   # the colour the decorative frames are drawn in
 
 
+def gap_for(size_pt, pitch):
+    """段落後の間隔 that puts a line of this size on the given pitch"""
+    return max(0, int(pitch - size_pt * 20 * LINE_FACTOR))
+
+
 def fits(markup, size_pt, height):
     """does this line stay inside its band, or will it wrap?"""
     return X.advance(markup) * size_pt * 20 <= height
+NAME_TAIL = 2200                   # column left free below 氏名, twips (39mm)
 
 
-def n_lines(markup, size_pt, height=TEXT_H):
-    """how many vertical lines a paragraph takes in a column of `height`"""
-    per = max(1, int(height // (size_pt * 20) * FILL))
-    return max(1, -(-int(X.advance(markup)) // per))
-
-
-def block_geometry(sheet):
-    """where each block sits, in twips from the left edge of the paper
-
-    How many lines the questions and the notes take can only be estimated
-    until the text is laid out, so `sheet['lines']` may carry the counts
-    measured from a first rendering; then the blocks fill the paper exactly.
-    """
-    if sheet.get('lines'):
-        q_lines, note_lines = sheet['lines']
-        aside_lines = q_lines + note_lines
-    else:
-        q_lines = sum(n_lines(t, sz) for t, sz in sheet['questions'])
-        aside_lines = q_lines + sum(n_lines(t, sz) for t, sz in sheet['notes'])
-    w_head = len(sheet['head']) * PITCH_HEAD
-    avail = TEXT_W - w_head - SLACK
-    pitch_body = (avail - aside_lines * PITCH_ASIDE) // max(1, len(sheet['upper']))
-    pitch_body = max(PITCH_BODY_MIN, min(PITCH_BODY_MAX, pitch_body))
-    w_body = pitch_body * len(sheet['upper'])
-    right = PG_W - M_LR
-    x_body = right - w_head - w_body
-    x_q = x_body - q_lines * PITCH_ASIDE
-    x_note = x_q - (aside_lines - q_lines) * PITCH_ASIDE
-    return dict(pitch_body=pitch_body, x_body=x_body, w_body=w_body,
-                x_q=x_q, x_note=x_note)
-
-
-def build_sheet(body, sheet, answers, first_of_document, frames=True):
+def build_sheet(body, sheet, answers, first_of_document, frames=True,
+                gap_aside=GAP_ASIDE, frame_rects=None):
     """one printed side"""
-    aside = [(t, sz, True) for t, sz in sheet['questions']]
-    aside += [(t, sz, False) for t, sz in sheet['notes']]
-    g = dict(block_geometry(sheet))
-    g.update(sheet.get('frame_x') or {})     # measured edges, when we have them
-    pitch_body = g['pitch_body']
-
-    # ---- 見出し・指示文・記名
+    # ---- 見出し（詩の題は本文側）・記名・指示文
     first = None
-    for markup, size, bold in sheet['head']:
-        p = para(body, PITCH_HEAD)
-        X.emit(p, markup, dict(font=X.TEXT, size=size, bold=bold,
-                               color=X.INDIGO if bold else X.INK),
+    for i, (markup, size, bold) in enumerate(sheet['head']):
+        name = markup.startswith('@')
+        p = para(body, after=GAP_HEAD,
+                 bottom=name, tail=NAME_TAIL if name else 0)
+        X.emit(p, markup.lstrip('@'),
+               dict(font=X.TEXT, size=size, bold=bold,
+                    color=X.INDIGO if bold else X.INK),
                show_answers=answers)
         if first is None:
             first = p
-    if frames:
-        # 語注 | 設問 | 本文 sit side by side; pad the outer edges only, and
-        # leave a hairline gap where two frames meet so they do not overlap
-        top, height = M_TOP - FRAME_PAD, TEXT_H + 2 * FRAME_PAD
-        cuts = [g['x_note'] - FRAME_PAD, g['x_q'], g['x_body'],
-                g['x_body'] + g['w_body'] + FRAME_PAD]
-        for i in range(3):
-            lo = cuts[i] + (FRAME_GAP if i else 0)
-            hi = cuts[i + 1] - (FRAME_GAP if i < 2 else 0)
-            X.shape(first, lo, top, hi - lo, height, i + 1)
+    if frames and frame_rects:
+        for i, (x0, y0, x1, y1) in enumerate(frame_rects, 1):
+            X.shape(first, x0, y0, x1 - x0, y1 - y0, i)
     end_section(body, cols=1, nextpage=not first_of_document)
 
-    # ---- 本文: 訓読文（上段） / 書き下し・訳（下段）
+    # ---- 本文: 訓読文（上段、手を加えない） / 書き下し・訳（下段、罫線つき）
+    pitch = int(sheet['upper_size'] * 20 * LINE_FACTOR) + GAP_UPPER
     for markup in sheet['upper']:
         if not fits(markup, sheet['upper_size'], BAND_TOP):
             print('  ! 上段からはみ出します（折り返します）:', X.plain(markup))
-        line(body, markup, pitch_body,
-             dict(font=X.BRUSH, size=sheet['upper_size'], color=X.INK), answers)
+        line(body, markup, dict(font=X.BRUSH, size=sheet['upper_size'],
+                                color=X.INK), after=GAP_UPPER, answers=answers)
     for i, markup in enumerate(sheet['lower']):
         if markup is not None and not fits(markup, sheet['lower_size'], BAND_BOT):
             print('  ! 下段からはみ出します（折り返します）:', X.plain(markup)[:20])
-        if answers:
-            if markup is None:
-                para(body, pitch_body, colbreak=(i == 0))
-            else:
-                line(body, markup, pitch_body,
-                     dict(font=X.TEXT, size=sheet['lower_size'], color=X.RED),
-                     True, colbreak=(i == 0))
-        else:
-            # every row gets a rule, including the one beside the poet's name
-            ruled(body, pitch_body, sheet['lower_size'], colbreak=(i == 0))
+        ruled(body, markup, sheet['lower_size'], answers,
+              after=gap_for(sheet['lower_size'], pitch), colbreak=(i == 0))
     end_section(body, uneven=True)
 
     # ---- 設問 → 語注（右から左へ）
-    for markup, size, _ in aside:
-        line(body, markup, PITCH_ASIDE,
-             dict(font=X.TEXT, size=size, color=X.INK), answers)
-    return pitch_body
+    for markup, size in sheet['questions'] + sheet['notes']:
+        line(body, markup, dict(font=X.TEXT, size=size, color=X.INK),
+             after=gap_aside, answers=answers)
 
 
 CT = '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
@@ -244,12 +231,14 @@ SETTINGS = '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 </w:settings>'''
 
 
-def write(sheets, path, answers, frames=True):
+def write(sheets, path, answers, frames=True, gaps=None, rects=None):
     doc = X.document()
     body = sub(doc, 'body')
     for i, sh in enumerate(sheets):
         build_sheet(body, sh, answers, first_of_document=(i == 0),
-                    frames=frames)
+                    frames=frames,
+                    gap_aside=(gaps or {}).get(i, GAP_ASIDE),
+                    frame_rects=(rects or {}).get(i))
         if i < len(sheets) - 1:
             end_section(body, cols=1)
     body.append(sectpr(cols=1))

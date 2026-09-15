@@ -30,6 +30,12 @@ INDIGO = '1B3A6B'
 RULE = 'B9C4D6'          # the faint guide line students write along
 FRAME = '8FA3C4'         # the decorative frames
 PAGE_W = 16838           # A4 landscape, twips -- needed to place a frame
+
+# Word measures a page-relative anchor in ordinary paper coordinates; in a
+# vertical-writing section LibreOffice reads the two axes rotated. Files are
+# written for Word; set this to 'preview' only to eyeball frame placement in
+# a LibreOffice rendering.
+SHAPE_AXES = 'word'
 BRUSH = 'HG正楷書体-PRO'
 TEXT = 'UD デジタル教科書体 N'
 
@@ -77,10 +83,11 @@ def rpr(font=TEXT, size=21, color=INK, bold=False, underline=None):
 def shape(p, x, y, w, h, ident, color=None, weight=12700, radius=4000):
     """A rounded frame floating behind the text.
 
-    Vertical writing rotates the frame an anchor is measured in: the
-    horizontal offset runs down from the top of the paper and the vertical
-    offset runs leftwards from its right edge. `x` and `y` here are ordinary
-    paper coordinates (twips from the left and top edges) and are converted.
+    `x` and `y` are ordinary paper coordinates, twips from the left and top
+    edges, and go into the file as they are -- that is how Word reads a
+    page-relative anchor. (LibreOffice reads the two axes rotated in a
+    vertical-writing section, so the preview puts these frames elsewhere;
+    trust Word, not the preview, for where a frame lands.)
     """
     color = color or FRAME
     r = sub(p, 'r')
@@ -91,9 +98,10 @@ def shape(p, x, y, w, h, ident, color=None, weight=12700, radius=4000):
                           allowOverlap='1')
     etree.SubElement(an, WP + 'simplePos', x='0', y='0')
     ph = etree.SubElement(an, WP + 'positionH', relativeFrom='page')
-    etree.SubElement(ph, WP + 'posOffset').text = str(int(y * EMU))
+    hx, vy = (x, y) if SHAPE_AXES == 'word' else (y, PAGE_W - x - w)
+    etree.SubElement(ph, WP + 'posOffset').text = str(int(hx * EMU))
     pv = etree.SubElement(an, WP + 'positionV', relativeFrom='page')
-    etree.SubElement(pv, WP + 'posOffset').text = str(int((PAGE_W - x - w) * EMU))
+    etree.SubElement(pv, WP + 'posOffset').text = str(int(vy * EMU))
     etree.SubElement(an, WP + 'extent', cx=str(int(w * EMU)), cy=str(int(h * EMU)))
     etree.SubElement(an, WP + 'effectExtent', l='0', t='0', r='0', b='0')
     etree.SubElement(an, WP + 'wrapNone')
@@ -178,7 +186,7 @@ def emit(p, markup, style, show_answers=True, blank_rule=RULE):
         {漢｜かん}  furigana        ^{二}  kaeriten / small okurigana
         《…》      answer          *…*   bold          #…#  heading term
     """
-    red = bold = term = False
+    red = bold = term = small = False
     buf = []
     i = 0
 
@@ -188,6 +196,8 @@ def emit(p, markup, style, show_answers=True, blank_rule=RULE):
         text = ''.join(buf)
         del buf[:]
         st = dict(style)
+        if small:
+            st['size'] = style.get('size', 10.5) * SMALL_RATIO
         if red:
             if not show_answers:
                 # leave a ruled space the student writes on
@@ -231,6 +241,8 @@ def emit(p, markup, style, show_answers=True, blank_rule=RULE):
             flush(); red = False; i += 1; continue
         if ch == '*':
             flush(); bold = not bold; i += 1; continue
+        if ch == '~':
+            flush(); small = not small; i += 1; continue
         if ch == '#':
             flush(); term = not term; i += 1; continue
         buf.append(ch)
@@ -245,6 +257,7 @@ def _blank_len(text):
     return max(2, min(n, 40))
 
 
+SMALL_RATIO = 0.72       # ~…~ runs, as a fraction of the base size
 RUBY_RATIO = 0.45        # furigana size, as a fraction of the base size
 KAERI_RATIO = 0.62       # 返り点 size, likewise
 
@@ -256,26 +269,30 @@ def advance(markup):
     {朝｜あしたニ} takes nearly twice the room of a bare 朝. Counting plain
     characters under-measures those lines and they wrap unexpectedly.
     """
-    total, i = 0.0, 0
+    total, i, scale = 0.0, 0, 1.0
     while i < len(markup):
         ch = markup[i]
+        if ch == '~':
+            scale = SMALL_RATIO if scale == 1.0 else 1.0
+            i += 1
+            continue
         if ch == '{':
             j = markup.find('}', i)
             if j > 0 and RUBY_SEP in markup[i + 1:j]:
                 base, rt = markup[i + 1:j].split(RUBY_SEP, 1)
-                total += max(len(base), len(rt) * RUBY_RATIO)
+                total += max(len(base), len(rt) * RUBY_RATIO) * scale
                 i = j + 1
                 continue
         if ch == '^' and markup[i + 1:i + 2] == '{':
             j = markup.find('}', i)
             if j > 0:
-                total += len(markup[i + 2:j]) * KAERI_RATIO
+                total += len(markup[i + 2:j]) * KAERI_RATIO * scale
                 i = j + 1
                 continue
         if ch in '《》*#':
             i += 1
             continue
-        total += 1
+        total += scale
         i += 1
     return total
 
@@ -296,7 +313,7 @@ def plain(markup):
             if j > 0:
                 i = j + 1
                 continue
-        if ch in '《》*#':
+        if ch in '《》*#~':
             i += 1
             continue
         out.append(ch)
