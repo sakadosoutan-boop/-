@@ -92,9 +92,13 @@ def widen(doc, sheets):
 
 
 def frames(doc, sheets):
-    """the rectangle each frame should sit on, in paper twips"""
+    """the rectangle each frame should sit on, in paper twips
+
+    Three frames per sheet: the whole 本文 (訓読文 and 書き下し・訳 together,
+    since they share the same columns, one above the other), then 設問, then
+    語注 -- in that order, matching how `build_sheet` draws them.
+    """
     pad, gap = S.FRAME_PAD, S.FRAME_GAP
-    band_y = S.M_TOP + S.BAND_TOP + S.BAND_GAP
     top, bottom = S.M_TOP - pad, S.M_TOP + S.TEXT_H + pad
     rects = {}
     for i, (page, sheet) in enumerate(zip(doc, sheets)):
@@ -105,22 +109,80 @@ def frames(doc, sheets):
         head_x = _find(cols, X.plain(sheet['head'][-1][0].lstrip('@')))
         if q_x is None or n_x is None or head_x is None:
             return None
-        # the headings and the notes both run the full height of the sheet, so
-        # the lower band is what lies below the poem and between the two
-        lower = [g for g in glyphs
-                 if g['bbox'][1] * PT > band_y
-                 and q_x + 2 < g['bbox'][0] < head_x - 2]
-        if not lower:
+        # the heading and the notes both run the full height of the sheet, so
+        # 本文 (both bands) is whatever lies between the two, full height
+        body = [g for g in glyphs if q_x + 2 < g['bbox'][0] < head_x - 2]
+        if not body:
             return None
         left = min(g['bbox'][0] for g in glyphs) * PT
-        lo = min(g['bbox'][0] for g in lower) * PT
-        hi = max(g['bbox'][2] for g in lower) * PT
+        lo = min(g['bbox'][0] for g in body) * PT
+        hi = max(g['bbox'][2] for g in body) * PT
         rects[i] = [
-            (lo - pad, band_y - pad, hi + pad, bottom),          # 書き下し・訳
+            (lo - pad, top, hi + pad, bottom),                   # 本文全体
             (n_x * PT + gap, top, q_x * PT + pad, bottom),       # 設問
             (left - pad, top, n_x * PT - gap, bottom),           # 語注
         ]
     return rects
+
+
+STEP = 0.3          # pt shed per shrink step
+FLOORS = {'aside': 8.0, 'lower': 8.0, 'head_bold': 10.5}
+
+
+def fits_budget(sheets):
+    return all(S.estimate_sheet_width(sh) <= S.TEXT_W - S.SLACK for sh in sheets)
+
+
+def lower_fits(sheets):
+    """Does every 書き下し／訳 line stay inside its own column?
+
+    This one matters beyond just the page count: if a single line wraps into
+    a second column, every line after it in that band shifts over by one --
+    the answers stop lining up under the 訓読文 they belong to.
+    """
+    height = S.BAND_BOT - S.BODY_TAIL
+    return all(S.fits(m, sh['lower_size'], height)
+               for sh in sheets for m in sh['lower'] if m)
+
+
+def shrink_lower(sheets):
+    """Shed size only from 書き下し／訳, the minimal fix for a line that
+    would otherwise wrap and throw off the alignment with 訓読文 above it."""
+    changed = False
+    height = S.BAND_BOT - S.BODY_TAIL
+    for sh in sheets:
+        if all(S.fits(m, sh['lower_size'], height) for m in sh['lower'] if m):
+            continue
+        new = max(FLOORS['lower'], sh['lower_size'] - STEP)
+        if new != sh['lower_size']:
+            sh['lower_size'] = new
+            changed = True
+    return changed
+
+
+def shrink(sheets):
+    """Shed a little size everywhere text can wrap into more 行 than the page
+    has room for -- notes and questions first (least noticeable), then the
+    書き下し／訳, then the bold title. 本文 (訓読文) is never touched here."""
+    changed = False
+    for sh in sheets:
+        new_qs = [(m, max(FLOORS['aside'], sz - STEP)) for m, sz in sh['questions']]
+        new_ns = [(m, max(FLOORS['aside'], sz - STEP)) for m, sz in sh['notes']]
+        if new_qs != sh['questions'] or new_ns != sh['notes']:
+            sh['questions'], sh['notes'] = new_qs, new_ns
+            changed = True
+            continue
+        lower = max(FLOORS['lower'], sh['lower_size'] - STEP)
+        if lower != sh['lower_size']:
+            sh['lower_size'] = lower
+            changed = True
+            continue
+        new_head = [(m, (max(FLOORS['head_bold'], sz - STEP) if bold else sz), bold)
+                    for m, sz, bold in sh['head']]
+        if new_head != sh['head']:
+            sh['head'] = new_head
+            changed = True
+    return changed
 
 
 def main():
@@ -130,9 +192,35 @@ def main():
     outdir = os.path.dirname(os.path.abspath(path))
     want_frames = data.get('FRAMES', 'shape') == 'shape'
 
+    # a cheap, render-free pass: first fix any 書き下し／訳 line that would
+    # wrap and break the alignment with 訓読文, then shrink until the
+    # arithmetic says each sheet fits the page width -- all before ever
+    # calling LibreOffice
+    budget_tries = 0
+    while not lower_fits(sheets) and budget_tries < 10 and shrink_lower(sheets):
+        budget_tries += 1
+    while not fits_budget(sheets) and budget_tries < 12 and shrink(sheets):
+        budget_tries += 1
+    if budget_tries:
+        print('  紙幅に収めるため文字をわずかに縮めました（%d 段階）' % budget_tries)
+
     probe = os.path.join(outdir, '%s_解答版.docx' % name)
     S.write(sheets, probe, True, frames=False)
     doc = render(probe)
+
+    # the real-render safety net: LibreOffice's substitute fonts read a touch
+    # narrower than Word's, so even a sheet that now fits the estimate can
+    # still spill onto another page once actually laid out -- shrink further
+    # if that happens
+    render_tries = 0
+    while (doc is not None and len(doc) != len(sheets)
+           and render_tries < 8 and shrink(sheets)):
+        render_tries += 1
+        S.write(sheets, probe, True, frames=False)
+        doc = render(probe)
+    if render_tries:
+        print('  実際に組んでもはみ出したため、さらに縮めました（%d 段階）' % render_tries)
+
     gaps = widen(doc, sheets) if doc and len(doc) == len(sheets) else None
     rects = None
     if gaps and want_frames:

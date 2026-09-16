@@ -33,11 +33,12 @@ BAND_BOT = TEXT_H - BAND_TOP - BAND_GAP    # 書き下し / 訳 band, 124mm
 # Line spacing is left at Word's default "1 行" everywhere, so the paragraph
 # dialog reads the way a teacher expects. The space between lines of the poem
 # and between notes comes from 段落後の間隔 instead, which in vertical writing
-# opens a gap to the left of the paragraph.
-GAP_HEAD = 220                     # 段落後の間隔, twips (4mm)
-GAP_UPPER = 280                    # 訓読文 (5mm)
+# opens a gap to the left of the paragraph -- kept tight, so consecutive 行
+# sit close together instead of floating apart.
+GAP_HEAD = 140                     # 段落後の間隔, twips (2.5mm)
+GAP_UPPER = 170                    # 訓読文 (3mm)
 GAP_ASIDE = 0                      # 語注・設問（refit が紙幅に合わせて広げる）
-GAP_ASIDE_MAX = 620
+GAP_ASIDE_MAX = 480
 
 # Word's "1 行" leaves about this much room per line, measured from a rendered
 # sheet. Used to give the 書き下し the same line pitch as the 訓読文 above it,
@@ -45,12 +46,12 @@ GAP_ASIDE_MAX = 620
 # at different sizes.
 LINE_FACTOR = 1.45
 
-# How much of a column a paragraph really gets to use. Kinsoku pushes
-# characters onto the next line and the frame eats a little at each end, so a
-# line holds fewer characters than the bare arithmetic says. 0.80 was measured
-# against the rendered sheet; it errs on the safe side, which costs a narrow
-# strip of white at the left edge but never pushes text onto a second page.
-FILL = 0.80
+# Margin of error between this preview (LibreOffice + substitute fonts) and
+# the real UD デジタル教科書体 N / HG正楷書体-PRO in Word, which set wider than
+# the stand-ins do -- a sheet that fits exactly here can overflow in Word.
+# Every character-count estimate below is inflated by this factor so the
+# printed sheet keeps a margin instead of running onto another page.
+SAFETY = 1.18
 
 FRAME_PAD = 110                        # twips of air between text and frame
 FRAME_GAP = 50                         # twips left clear between two frames
@@ -124,22 +125,20 @@ def line(body, markup, style, after=0, colbreak=False, answers=True, **kw):
     return p
 
 
-def ruled(body, markup, size, answers, after=0, colbreak=False):
-    """A writing line: one rule down the whole band, with the answer on it.
-
-    The rule is an underline, which in vertical writing runs alongside the
-    column. The answer is underlined too, so the line is continuous whether
-    the answer is printed or not and the two editions match exactly.
+def grid_line(body, markup, size, answers, after=0, colbreak=False):
+    """A writing line set as a lattice of boxed cells (格子) -- manuscript
+    paper the student writes on, one square per character, the whole way
+    down the band. Both editions use the same box colour and the same
+    number of cells, so a blank sheet and its answer key line up exactly.
     """
     p = para(body, after=after, colbreak=colbreak, tail=BODY_TAIL)
     room = max(1, int((BAND_BOT - BODY_TAIL) // (size * 20)) - 1)
-    used = 0
-    if answers and markup:
-        X.emit(p, markup, dict(font=X.TEXT, size=size, color=X.RED,
-                               underline=X.RULE))
-        used = int(X.advance(markup) + 0.999)
+    used, odd = 0, False
+    if markup:
+        used, odd = X.emit_grid(p, markup, dict(font=X.TEXT, size=size, color=X.INK),
+                                answers, X.RULE)
     n = max(2, room - used)
-    X.run(p, '　' * n, font=X.TEXT, size=size, color=X.INK, underline=X.RULE)
+    X.grid_blank(p, n, X.RULE, start_odd=odd, font=X.TEXT, size=size, color=X.INK)
     return p
 
 
@@ -161,8 +160,49 @@ def gap_for(size_pt, pitch):
 
 
 def fits(markup, size_pt, height):
-    """does this line stay inside its band, or will it wrap?"""
+    """does this line stay inside its band, or will it wrap?
+
+    Padded by SAFETY, because a real-font sheet can run narrower than this
+    preview's substitute fonts. Used wherever a line running long has a fix
+    available (書き下し・訳, 語注, 設問) -- see `fits_raw` for 訓読文, which
+    is never resized here.
+    """
+    return X.advance(markup) * size_pt * 20 * SAFETY <= height
+
+
+def fits_raw(markup, size_pt, height):
+    """does this line stay inside its band, with no safety padding?
+
+    本文 (訓読文) is left exactly as the teacher set it -- nothing here can
+    shrink it, so padding this check would just print a warning with no fix
+    to offer.
+    """
     return X.advance(markup) * size_pt * 20 <= height
+
+
+def n_lines(markup, size_pt, height):
+    """how many wrapped 行 this note/question paragraph will need"""
+    per_col = max(1, int(height / (size_pt * 20 * SAFETY)))
+    return max(1, -(-int(X.advance(markup) + 0.999) // per_col))
+
+
+def estimate_sheet_width(sheet):
+    """A cheap (no rendering) estimate of how much of the page a sheet asks
+    for, so build.py can tell before ever calling LibreOffice whether it
+    needs to shrink something to keep the sheet to one page."""
+    head_w = 0
+    for markup, size, _ in sheet['head']:
+        n = n_lines(markup.lstrip('@'), size, TEXT_H)
+        head_w += n * (size * 20 * LINE_FACTOR) + GAP_HEAD
+    pitch = int(sheet['upper_size'] * 20 * LINE_FACTOR) + GAP_UPPER
+    body_w = pitch * len(sheet['upper'])
+    aside_w = 0
+    for markup, size in sheet['questions'] + sheet['notes']:
+        n = n_lines(markup, size, TEXT_H - ASIDE_TAIL)
+        aside_w += n * (size * 20 * LINE_FACTOR)
+    return head_w + body_w + aside_w
+
+
 NAME_TAIL = 2200                   # column left free below 氏名, twips (39mm)
 
 
@@ -186,10 +226,10 @@ def build_sheet(body, sheet, answers, first_of_document, frames=True,
             X.shape(first, x0, y0, x1 - x0, y1 - y0, i)
     end_section(body, cols=1, nextpage=not first_of_document)
 
-    # ---- 本文: 訓読文（上段、手を加えない） / 書き下し・訳（下段、罫線つき）
+    # ---- 本文: 訓読文（上段、手を加えない） / 書き下し・訳（下段、格子つき）
     pitch = int(sheet['upper_size'] * 20 * LINE_FACTOR) + GAP_UPPER
     for markup in sheet['upper']:
-        if not fits(markup, sheet['upper_size'], BAND_TOP - BODY_TAIL):
+        if not fits_raw(markup, sheet['upper_size'], BAND_TOP - BODY_TAIL):
             print('  ! 上段からはみ出します（折り返します）:', X.plain(markup))
         line(body, markup, dict(font=X.BRUSH, size=sheet['upper_size'],
                                 color=X.INK), after=GAP_UPPER, answers=answers,
@@ -198,8 +238,8 @@ def build_sheet(body, sheet, answers, first_of_document, frames=True,
         if markup is not None and not fits(markup, sheet['lower_size'],
                                            BAND_BOT - BODY_TAIL):
             print('  ! 下段からはみ出します（折り返します）:', X.plain(markup)[:20])
-        ruled(body, markup, sheet['lower_size'], answers,
-              after=gap_for(sheet['lower_size'], pitch), colbreak=(i == 0))
+        grid_line(body, markup, sheet['lower_size'], answers,
+                  after=gap_for(sheet['lower_size'], pitch), colbreak=(i == 0))
     end_section(body, uneven=True)
 
     # ---- 設問 → 語注（右から左へ）
