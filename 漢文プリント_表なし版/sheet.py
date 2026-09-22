@@ -3,15 +3,10 @@
 
 The page is vertical writing (縦書き), so section breaks stack the blocks
 right to left and an uneven-column section splits the page into stacked
-bands. A normal (two-page) sheet is:
+bands:
 
     [見出し・記名] [訓読文 / 書き下し(訳)の2段] [設問] [語注]
      ← 1段        ← 2段組み                    ← 1段   ← 1段
-
-and a short poem that fits on one page (`build_combined_sheet`) stacks three
-bands instead of two:
-
-    [見出し・記名] [訓読文/書き下し/現代語訳の3段] [設問] [語注]
 
 Every paragraph is given an *exact* line pitch (`lineRule="exact"`), not
 Word's "1 行" auto spacing. Auto spacing is computed from whatever font is
@@ -24,6 +19,12 @@ open. Exact spacing is a fixed number of twips regardless of font, so a
 sheet that fits here fits in Word too, and a hand-added paragraph that
 happens to lose its override still falls back to a *tight* default (set in
 STYLES below) instead of Word's roomy one.
+
+設問・語注 used to have their 段落後の間隔 (the gap between 行) stretched
+out to make the block reach the left margin -- but that stretch is exactly
+what read as "行間が不自然に開いている" to a teacher looking at the file in
+Word, so 設問・語注 now get the same small, fixed gap as everything else
+(`GAP_ASIDE`) and simply leave blank paper below if they are short.
 """
 import zipfile
 from lxml import etree
@@ -42,12 +43,6 @@ TEXT_H = PG_H - M_TOP - M_BOT      # 10036
 BAND_TOP = 3402                    # 訓読文 band, 60mm (2-band sheet)
 BAND_GAP = 284                     # 5mm, between any two stacked bands
 BAND_BOT = TEXT_H - BAND_TOP - BAND_GAP    # 書き下し / 訳 band, 112mm
-
-# the 3-band, one-page layout for a poem short enough to skip a second sheet.
-# 現代語訳 runs the longest per line of the three, so it gets what is left.
-CBAND_TOP = 2200                   # 訓読文, 39mm
-CBAND_MID = 2550                   # 書き下し, 45mm
-CBAND_BOT = TEXT_H - CBAND_TOP - CBAND_MID - 2 * BAND_GAP   # 現代語訳, ~83mm
 
 # Every paragraph's line spacing is exact -- a fixed number of twips per
 # character, chosen once here rather than measured off whatever font happens
@@ -68,8 +63,7 @@ def pitch_of(size_pt):
 # too loose, and it is independent of each 行's own (now-fixed) line pitch.
 GAP_HEAD = 140                     # 見出し・記名 (2.5mm)
 GAP_UPPER = 170                    # 訓読文 (3mm)
-GAP_ASIDE = 0                      # 語注・設問（refit が紙幅に合わせて広げる）
-GAP_ASIDE_MAX = 480
+GAP_ASIDE = 170                    # 語注・設問 -- 他と同じ、普通の行間 (3mm)
 
 # A small residual margin, not for font-metric drift (exact spacing already
 # removes that) but for `advance()`'s own estimate of how much room a ruby
@@ -264,15 +258,15 @@ def _head_and_frame(body, sheet, answers, frames, frame_rects):
             X.shape(first, x0, y0, x1 - x0, y1 - y0, i)
 
 
-def _aside(body, sheet, answers, gap_aside):
+def _aside(body, sheet, answers):
     """設問 → 語注（右から左へ）"""
     for markup, size in sheet['questions'] + sheet['notes']:
         line(body, markup, dict(font=X.TEXT, size=size, color=X.INK),
-             after=gap_aside, answers=answers, tail=ASIDE_TAIL)
+             after=GAP_ASIDE, answers=answers, tail=ASIDE_TAIL)
 
 
 def build_sheet(body, sheet, answers, first_of_document, frames=True,
-                gap_aside=GAP_ASIDE, frame_rects=None):
+                frame_rects=None):
     """one printed side: 訓読文 above, 書き下し or 訳 below (2 bands)"""
     _head_and_frame(body, sheet, answers, frames, frame_rects)
     end_section(body, cols=1, nextpage=not first_of_document)
@@ -293,38 +287,7 @@ def build_sheet(body, sheet, answers, first_of_document, frames=True,
                    after=gap_for(sheet['lower_size'], pitch), colbreak=(i == 0))
     end_section(body, bands=[BAND_TOP, BAND_BOT])
 
-    _aside(body, sheet, answers, gap_aside)
-
-
-def build_combined_sheet(page, body, answers, first_of_document, frames=True,
-                         gap_aside=GAP_ASIDE, frame_rects=None):
-    """one printed side: 訓読文 / 書き下し / 現代語訳, stacked (3 bands) --
-    for a poem short enough that both editions fit on a single page."""
-    _head_and_frame(body, page, answers, frames, frame_rects)
-    end_section(body, cols=1, nextpage=not first_of_document)
-
-    pitch = pitch_of(page['upper_size']) + GAP_UPPER
-    for markup in page['upper']:
-        if not fits_raw(markup, page['upper_size'], CBAND_TOP - BODY_TAIL):
-            print('  ! 上段からはみ出します（折り返します）:', X.plain(markup))
-        line(body, markup, dict(font=X.BRUSH, size=page['upper_size'],
-                                color=X.INK), after=GAP_UPPER, answers=answers,
-             tail=BODY_TAIL)
-    for i, markup in enumerate(page['mid']):
-        if markup is not None and not fits(markup, page['mid_size'],
-                                           CBAND_MID - BODY_TAIL):
-            print('  ! 中段からはみ出します（折り返します）:', X.plain(markup)[:20])
-        ruled_line(body, markup, page['mid_size'], answers, CBAND_MID,
-                   after=gap_for(page['mid_size'], pitch), colbreak=(i == 0))
-    for i, markup in enumerate(page['lower']):
-        if markup is not None and not fits(markup, page['lower_size'],
-                                           CBAND_BOT - BODY_TAIL):
-            print('  ! 下段からはみ出します（折り返します）:', X.plain(markup)[:20])
-        ruled_line(body, markup, page['lower_size'], answers, CBAND_BOT,
-                   after=gap_for(page['lower_size'], pitch), colbreak=(i == 0))
-    end_section(body, bands=[CBAND_TOP, CBAND_MID, CBAND_BOT])
-
-    _aside(body, page, answers, gap_aside)
+    _aside(body, sheet, answers)
 
 
 CT = '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
@@ -375,18 +338,12 @@ SETTINGS = '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 </w:settings>'''
 
 
-def write(sheets, path, answers, frames=True, gaps=None, rects=None):
-    """`sheets` is a list of page specs. A spec with a `mid` key is drawn as
-    a single combined (3-band) page; otherwise it is a normal 2-band sheet."""
+def write(sheets, path, answers, frames=True, rects=None):
     doc = X.document()
     body = sub(doc, 'body')
     for i, sh in enumerate(sheets):
-        kw = dict(frames=frames, gap_aside=(gaps or {}).get(i, GAP_ASIDE),
-                  frame_rects=(rects or {}).get(i))
-        if 'mid' in sh:
-            build_combined_sheet(sh, body, answers, first_of_document=(i == 0), **kw)
-        else:
-            build_sheet(body, sh, answers, first_of_document=(i == 0), **kw)
+        build_sheet(body, sh, answers, first_of_document=(i == 0),
+                   frames=frames, frame_rects=(rects or {}).get(i))
         if i < len(sheets) - 1:
             end_section(body, cols=1)
     body.append(sectpr(cols=1))
