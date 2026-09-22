@@ -133,6 +133,15 @@ def fits_budget(sheets):
     return all(S.estimate_sheet_width(sh) <= S.TEXT_W - S.SLACK for sh in sheets)
 
 
+def _ruled_bands(sheet):
+    """the ruled (書き下し／訳) bands this sheet has, as
+    (list key, size key, band height) -- one for a normal 2-band sheet,
+    two (書き下し then 訳) for a combined 3-band one-page sheet."""
+    if 'mid' in sheet:
+        return [('mid', 'mid_size', S.CBAND_MID), ('lower', 'lower_size', S.CBAND_BOT)]
+    return [('lower', 'lower_size', S.BAND_BOT)]
+
+
 def lower_fits(sheets):
     """Does every 書き下し／訳 line stay inside its own column?
 
@@ -140,30 +149,35 @@ def lower_fits(sheets):
     a second column, every line after it in that band shifts over by one --
     the answers stop lining up under the 訓読文 they belong to.
     """
-    height = S.BAND_BOT - S.BODY_TAIL
-    return all(S.fits(m, sh['lower_size'], height)
-               for sh in sheets for m in sh['lower'] if m)
+    for sh in sheets:
+        for key, size_key, band in _ruled_bands(sh):
+            height = band - S.BODY_TAIL
+            if not all(S.fits(m, sh[size_key], height) for m in sh[key] if m):
+                return False
+    return True
 
 
 def shrink_lower(sheets):
     """Shed size only from 書き下し／訳, the minimal fix for a line that
     would otherwise wrap and throw off the alignment with 訓読文 above it."""
     changed = False
-    height = S.BAND_BOT - S.BODY_TAIL
     for sh in sheets:
-        if all(S.fits(m, sh['lower_size'], height) for m in sh['lower'] if m):
-            continue
-        new = max(FLOORS['lower'], sh['lower_size'] - STEP)
-        if new != sh['lower_size']:
-            sh['lower_size'] = new
-            changed = True
+        for key, size_key, band in _ruled_bands(sh):
+            height = band - S.BODY_TAIL
+            if all(S.fits(m, sh[size_key], height) for m in sh[key] if m):
+                continue
+            new = max(FLOORS['lower'], sh[size_key] - STEP)
+            if new != sh[size_key]:
+                sh[size_key] = new
+                changed = True
     return changed
 
 
 def shrink(sheets):
     """Shed a little size everywhere text can wrap into more 行 than the page
     has room for -- notes and questions first (least noticeable), then the
-    書き下し／訳, then the bold title. 本文 (訓読文) is never touched here."""
+    書き下し／訳 (and, on a combined sheet, then 現代語訳 too), then the bold
+    title. 本文 (訓読文) is never touched here."""
     changed = False
     for sh in sheets:
         new_qs = [(m, max(FLOORS['aside'], sz - STEP)) for m, sz in sh['questions']]
@@ -172,10 +186,14 @@ def shrink(sheets):
             sh['questions'], sh['notes'] = new_qs, new_ns
             changed = True
             continue
-        lower = max(FLOORS['lower'], sh['lower_size'] - STEP)
-        if lower != sh['lower_size']:
-            sh['lower_size'] = lower
-            changed = True
+        shrunk_a_band = False
+        for _, size_key, _ in _ruled_bands(sh):
+            new = max(FLOORS['lower'], sh[size_key] - STEP)
+            if new != sh[size_key]:
+                sh[size_key] = new
+                changed = shrunk_a_band = True
+                break
+        if shrunk_a_band:
             continue
         new_head = [(m, (max(FLOORS['head_bold'], sz - STEP) if bold else sz), bold)
                     for m, sz, bold in sh['head']]

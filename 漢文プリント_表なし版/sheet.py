@@ -2,15 +2,28 @@
 """Build the worksheet as plain paragraphs -- no tables anywhere.
 
 The page is vertical writing (縦書き), so section breaks stack the blocks
-right to left and a two-column section splits the page into an upper and a
-lower band. One sheet is therefore:
+right to left and an uneven-column section splits the page into stacked
+bands. A normal (two-page) sheet is:
 
     [見出し・記名] [訓読文 / 書き下し(訳)の2段] [設問] [語注]
      ← 1段        ← 2段組み                    ← 1段   ← 1段
 
-Every line has an exact pitch, so a block's width is just
-(number of lines) x (pitch) -- which is what lets the decorative frames be
-placed behind the text without measuring anything.
+and a short poem that fits on one page (`build_combined_sheet`) stacks three
+bands instead of two:
+
+    [見出し・記名] [訓読文/書き下し/現代語訳の3段] [設問] [語注]
+
+Every paragraph is given an *exact* line pitch (`lineRule="exact"`), not
+Word's "1 行" auto spacing. Auto spacing is computed from whatever font is
+actually installed, so the same file measures differently on this preview
+(LibreOffice + substitute fonts) and in a teacher's Word (the real UD デジタ
+ル教科書体 N / HG正楷書体-PRO) -- which is what made the old auto-spaced
+sheets drift and, once a paragraph lost its explicit override (e.g. a line
+added by hand in Word, which falls back to the document default), balloon
+open. Exact spacing is a fixed number of twips regardless of font, so a
+sheet that fits here fits in Word too, and a hand-added paragraph that
+happens to lose its override still falls back to a *tight* default (set in
+STYLES below) instead of Word's roomy one.
 """
 import zipfile
 from lxml import etree
@@ -24,46 +37,55 @@ PG_W, PG_H = 16838, 11906          # A4 landscape, twips
 # bottom edge, which reads as text spilling off the sheet
 M_TOP, M_BOT, M_LR = 850, 1020, 907
 TEXT_W = PG_W - 2 * M_LR           # 15024
-TEXT_H = PG_H - M_TOP - M_BOT      # 10262
+TEXT_H = PG_H - M_TOP - M_BOT      # 10036
 
-BAND_TOP = 3402                    # 訓読文 band, 60mm
-BAND_GAP = 284                     # 5mm
-BAND_BOT = TEXT_H - BAND_TOP - BAND_GAP    # 書き下し / 訳 band, 124mm
+BAND_TOP = 3402                    # 訓読文 band, 60mm (2-band sheet)
+BAND_GAP = 284                     # 5mm, between any two stacked bands
+BAND_BOT = TEXT_H - BAND_TOP - BAND_GAP    # 書き下し / 訳 band, 112mm
 
-# Line spacing is left at Word's default "1 行" everywhere, so the paragraph
-# dialog reads the way a teacher expects. The space between lines of the poem
-# and between notes comes from 段落後の間隔 instead, which in vertical writing
-# opens a gap to the left of the paragraph -- kept tight, so consecutive 行
-# sit close together instead of floating apart.
-GAP_HEAD = 140                     # 段落後の間隔, twips (2.5mm)
+# the 3-band, one-page layout for a poem short enough to skip a second sheet.
+# 現代語訳 runs the longest per line of the three, so it gets what is left.
+CBAND_TOP = 2200                   # 訓読文, 39mm
+CBAND_MID = 2550                   # 書き下し, 45mm
+CBAND_BOT = TEXT_H - CBAND_TOP - CBAND_MID - 2 * BAND_GAP   # 現代語訳, ~83mm
+
+# Every paragraph's line spacing is exact -- a fixed number of twips per
+# character, chosen once here rather than measured off whatever font happens
+# to be installed. 1.45x the point size matches the density the previous
+# (auto-spaced) sheets already had -- this is not new "extra" room, just the
+# same density made deterministic; 段落後の間隔 (below) is the visible gap
+# between 行, and is what actually reads as "line spacing" to a teacher.
+LINE_FACTOR = 1.45
+
+
+def pitch_of(size_pt):
+    """the exact twips-per-character height for a run at this point size"""
+    return int(round(size_pt * 20 * LINE_FACTOR))
+
+
+# 段落後の間隔 -- in vertical writing, horizontal space to the left of a 行.
+# Kept tight: this is what "行間" means when a teacher says the sheet looks
+# too loose, and it is independent of each 行's own (now-fixed) line pitch.
+GAP_HEAD = 140                     # 見出し・記名 (2.5mm)
 GAP_UPPER = 170                    # 訓読文 (3mm)
 GAP_ASIDE = 0                      # 語注・設問（refit が紙幅に合わせて広げる）
 GAP_ASIDE_MAX = 480
 
-# Word's "1 行" leaves about this much room per line, measured from a rendered
-# sheet. Used to give the 書き下し the same line pitch as the 訓読文 above it,
-# so each answer sits under the line it belongs to even though the two are set
-# at different sizes.
-LINE_FACTOR = 1.45
-
-# Margin of error between this preview (LibreOffice + substitute fonts) and
-# the real UD デジタル教科書体 N / HG正楷書体-PRO in Word, which set wider than
-# the stand-ins do -- a sheet that fits exactly here can overflow in Word.
-# Every character-count estimate below is inflated by this factor so the
-# printed sheet keeps a margin instead of running onto another page.
-SAFETY = 1.18
+# A small residual margin, not for font-metric drift (exact spacing already
+# removes that) but for `advance()`'s own estimate of how much room a ruby
+# reading or a 返り点 needs -- a model, not a measurement.
+SAFETY = 1.05
 
 FRAME_PAD = 110                        # twips of air between text and frame
 FRAME_GAP = 50                         # twips left clear between two frames
 
 # Each section's first and last line come out a little wider than the exact
-# pitch asks for (measured: about 7pt at each end, with or without a frame),
-# and there are three sections on a sheet. Hold that much back so the sheet
-# still fits on one page.
+# pitch asks for, and there are three sections on a sheet. Hold that much
+# back so the sheet still fits on one page.
 SLACK = 700                            # twips
 
 
-def sectpr(cols=1, uneven=False, continuous=True, nextpage=False):
+def sectpr(cols=1, bands=None, continuous=True, nextpage=False):
     sp = el('sectPr')
     if nextpage:
         sp.append(el('type', val='nextPage'))
@@ -72,10 +94,10 @@ def sectpr(cols=1, uneven=False, continuous=True, nextpage=False):
     sp.append(el('pgSz', w=PG_W, h=PG_H, orient='landscape'))
     sp.append(el('pgMar', top=M_TOP, right=M_LR, bottom=M_BOT, left=M_LR,
                  header=567, footer=567, gutter=0))
-    if uneven:
-        c = el('cols', num=2, space=BAND_GAP, equalWidth=0)
-        c.append(el('col', w=BAND_TOP, space=BAND_GAP))
-        c.append(el('col', w=BAND_BOT))
+    if bands:
+        c = el('cols', num=len(bands), space=BAND_GAP, equalWidth=0)
+        for w in bands:
+            c.append(el('col', w=w, space=BAND_GAP))
         sp.append(c)
     else:
         sp.append(el('cols', num=cols, space=BAND_GAP, equalWidth=1))
@@ -90,25 +112,29 @@ ASIDE_TAIL = 230                   # 4mm kept clear at the foot of a note
 BODY_TAIL = 170                    # 3mm, likewise for the poem and the answers
 
 
-def para(body, after=0, before=0, colbreak=False, bottom=False, tail=0,
-         rule=None):
-    """One paragraph at the default 1-line spacing.
+def para(body, size, after=0, before=0, colbreak=False, bottom=False, tail=0,
+         box=None):
+    """One paragraph at an exact line pitch for `size` (see `pitch_of`).
 
     `after` is 段落後の間隔 -- in vertical writing that is horizontal space to
     the left of this line. `bottom` sets 下詰め and `tail` keeps that much of
-    the column free below the text.
+    the column free below the text. `box` draws a ruled box around the whole
+    paragraph (see `ruled_line`) -- a *paragraph* border, so it is immune to
+    the run-level fragility that made the old per-character grid disappear
+    the moment a teacher retyped a word inside it in Word: whatever text
+    ends up in this paragraph, the border stays, because it belongs to the
+    paragraph mark, not to any one run of text.
     """
     p = sub(body, 'p')
     pr = sub(p, 'pPr')
-    if rule:
-        # in vertical writing a paragraph's bottom border runs alongside the
-        # line for its whole length -- exactly the rule to write on
+    if box:
         bd = el('pBdr')
-        bd.append(el('bottom', val='single', sz=4, space=1, color=rule))
+        for side in ('top', 'left', 'bottom', 'right'):
+            bd.append(el(side, val='single', sz=4, space=1, color=box))
         pr.append(bd)
     pr.append(el('snapToGrid', val=0))
     pr.append(el('spacing', before=before, after=after,
-                 line=240, lineRule='auto'))
+                 line=pitch_of(size), lineRule='exact'))
     if tail:
         pr.append(el('ind', right=tail))
     if bottom:
@@ -120,25 +146,29 @@ def para(body, after=0, before=0, colbreak=False, bottom=False, tail=0,
 
 
 def line(body, markup, style, after=0, colbreak=False, answers=True, **kw):
-    p = para(body, after=after, colbreak=colbreak, **kw)
+    p = para(body, style.get('size', 10.5), after=after, colbreak=colbreak, **kw)
     X.emit(p, markup, style, show_answers=answers)
     return p
 
 
-def grid_line(body, markup, size, answers, after=0, colbreak=False):
-    """A writing line set as a lattice of boxed cells (格子) -- manuscript
-    paper the student writes on, one square per character, the whole way
-    down the band. Both editions use the same box colour and the same
-    number of cells, so a blank sheet and its answer key line up exactly.
+def ruled_line(body, markup, size, answers, band, after=0, colbreak=False):
+    """A writing line boxed the full depth of its band -- a ruled box the
+    student writes the answer into, the whole way down. Both editions get
+    the same box (padded with blank characters to a uniform depth), so a
+    blank sheet and its answer key line up exactly, and the border is on
+    the paragraph itself so retyping the text later in Word can never lose
+    it (see `para`).
     """
-    p = para(body, after=after, colbreak=colbreak, tail=BODY_TAIL)
-    room = max(1, int((BAND_BOT - BODY_TAIL) // (size * 20)) - 1)
-    used, odd = 0, False
+    p = para(body, size, after=after, colbreak=colbreak, tail=BODY_TAIL,
+             box=X.RULE)
+    style = dict(font=X.TEXT, size=size, color=X.INK)
+    used = 0
     if markup:
-        used, odd = X.emit_grid(p, markup, dict(font=X.TEXT, size=size, color=X.INK),
-                                answers, X.RULE)
+        X.emit(p, markup, dict(style, color=X.RED), show_answers=answers)
+        used = int(X.advance(markup) + 0.999)
+    room = max(1, int((band - BODY_TAIL) // (size * 20)) - 1)
     n = max(2, room - used)
-    X.grid_blank(p, n, X.RULE, start_odd=odd, font=X.TEXT, size=size, color=X.INK)
+    X.run(p, '　' * n, **style)
     return p
 
 
@@ -156,64 +186,72 @@ FRAME = '8FA3C4'                   # the colour the decorative frames are drawn 
 
 def gap_for(size_pt, pitch):
     """段落後の間隔 that puts a line of this size on the given pitch"""
-    return max(0, int(pitch - size_pt * 20 * LINE_FACTOR))
+    return max(0, pitch - pitch_of(size_pt))
 
 
 def fits(markup, size_pt, height):
     """does this line stay inside its band, or will it wrap?
 
-    Padded by SAFETY, because a real-font sheet can run narrower than this
-    preview's substitute fonts. Used wherever a line running long has a fix
-    available (書き下し・訳, 語注, 設問) -- see `fits_raw` for 訓読文, which
-    is never resized here.
+    A run of characters that never wraps advances at its own glyph size
+    (measured: exactly 1.0x the point size, unaffected by this paragraph's
+    exact line pitch -- that pitch only governs the gap *between* separate
+    行, not the density of characters within one unbroken run). SAFETY pads
+    only the residual uncertainty in `advance()`'s own model of how much
+    room a ruby reading or a 返り点 needs.
     """
     return X.advance(markup) * size_pt * 20 * SAFETY <= height
 
 
 def fits_raw(markup, size_pt, height):
-    """does this line stay inside its band, with no safety padding?
-
-    本文 (訓読文) is left exactly as the teacher set it -- nothing here can
-    shrink it, so padding this check would just print a warning with no fix
-    to offer.
+    """does this line stay inside its band, with no residual padding --
+    本文 (訓読文) is left exactly as the teacher set it, so a warning here
+    has no fix to offer and should not cry wolf over the small SAFETY margin.
     """
     return X.advance(markup) * size_pt * 20 <= height
 
 
 def n_lines(markup, size_pt, height):
-    """how many wrapped 行 this note/question paragraph will need"""
+    """how many wrapped 行 this note/question paragraph will need.
+
+    An explicit \\n (see `oxml.emit`) always starts a fresh 行, so each
+    segment between them is measured on its own rather than letting one
+    long segment borrow room from a short one next to it.
+    """
     per_col = max(1, int(height / (size_pt * 20 * SAFETY)))
-    return max(1, -(-int(X.advance(markup) + 0.999) // per_col))
+    total = 0
+    for seg in markup.split('\n'):
+        total += max(1, -(-int(X.advance(seg) + 0.999) // per_col))
+    return total
 
 
 def estimate_sheet_width(sheet):
     """A cheap (no rendering) estimate of how much of the page a sheet asks
     for, so build.py can tell before ever calling LibreOffice whether it
-    needs to shrink something to keep the sheet to one page."""
+    needs to shrink something to keep the sheet to the page(s) it should
+    take. Works for both the 2-band and the 3-band (combined) layout."""
     head_w = 0
     for markup, size, _ in sheet['head']:
         n = n_lines(markup.lstrip('@'), size, TEXT_H)
-        head_w += n * (size * 20 * LINE_FACTOR) + GAP_HEAD
-    pitch = int(sheet['upper_size'] * 20 * LINE_FACTOR) + GAP_UPPER
+        head_w += n * pitch_of(size) + GAP_HEAD
+    pitch = pitch_of(sheet['upper_size']) + GAP_UPPER
     body_w = pitch * len(sheet['upper'])
     aside_w = 0
     for markup, size in sheet['questions'] + sheet['notes']:
         n = n_lines(markup, size, TEXT_H - ASIDE_TAIL)
-        aside_w += n * (size * 20 * LINE_FACTOR)
+        aside_w += n * pitch_of(size)
     return head_w + body_w + aside_w
 
 
 NAME_TAIL = 2200                   # column left free below 氏名, twips (39mm)
 
 
-def build_sheet(body, sheet, answers, first_of_document, frames=True,
-                gap_aside=GAP_ASIDE, frame_rects=None):
-    """one printed side"""
-    # ---- 見出し（詩の題は本文側）・記名・指示文
+def _head_and_frame(body, sheet, answers, frames, frame_rects):
+    """見出し・記名, plus (optionally) the decorative frames anchored to the
+    first heading paragraph. Shared by the 2-band and 3-band builders."""
     first = None
-    for i, (markup, size, bold) in enumerate(sheet['head']):
+    for markup, size, bold in sheet['head']:
         name = markup.startswith('@')
-        p = para(body, after=GAP_HEAD,
+        p = para(body, size, after=GAP_HEAD,
                  bottom=name, tail=NAME_TAIL if name else 0)
         X.emit(p, markup.lstrip('@'),
                dict(font=X.TEXT, size=size, bold=bold,
@@ -224,10 +262,23 @@ def build_sheet(body, sheet, answers, first_of_document, frames=True,
     if frames and frame_rects:
         for i, (x0, y0, x1, y1) in enumerate(frame_rects, 1):
             X.shape(first, x0, y0, x1 - x0, y1 - y0, i)
+
+
+def _aside(body, sheet, answers, gap_aside):
+    """設問 → 語注（右から左へ）"""
+    for markup, size in sheet['questions'] + sheet['notes']:
+        line(body, markup, dict(font=X.TEXT, size=size, color=X.INK),
+             after=gap_aside, answers=answers, tail=ASIDE_TAIL)
+
+
+def build_sheet(body, sheet, answers, first_of_document, frames=True,
+                gap_aside=GAP_ASIDE, frame_rects=None):
+    """one printed side: 訓読文 above, 書き下し or 訳 below (2 bands)"""
+    _head_and_frame(body, sheet, answers, frames, frame_rects)
     end_section(body, cols=1, nextpage=not first_of_document)
 
-    # ---- 本文: 訓読文（上段、手を加えない） / 書き下し・訳（下段、格子つき）
-    pitch = int(sheet['upper_size'] * 20 * LINE_FACTOR) + GAP_UPPER
+    # ---- 本文: 訓読文（上段、手を加えない） / 書き下し・訳（下段、罫線つき）
+    pitch = pitch_of(sheet['upper_size']) + GAP_UPPER
     for markup in sheet['upper']:
         if not fits_raw(markup, sheet['upper_size'], BAND_TOP - BODY_TAIL):
             print('  ! 上段からはみ出します（折り返します）:', X.plain(markup))
@@ -238,14 +289,42 @@ def build_sheet(body, sheet, answers, first_of_document, frames=True,
         if markup is not None and not fits(markup, sheet['lower_size'],
                                            BAND_BOT - BODY_TAIL):
             print('  ! 下段からはみ出します（折り返します）:', X.plain(markup)[:20])
-        grid_line(body, markup, sheet['lower_size'], answers,
-                  after=gap_for(sheet['lower_size'], pitch), colbreak=(i == 0))
-    end_section(body, uneven=True)
+        ruled_line(body, markup, sheet['lower_size'], answers, BAND_BOT,
+                   after=gap_for(sheet['lower_size'], pitch), colbreak=(i == 0))
+    end_section(body, bands=[BAND_TOP, BAND_BOT])
 
-    # ---- 設問 → 語注（右から左へ）
-    for markup, size in sheet['questions'] + sheet['notes']:
-        line(body, markup, dict(font=X.TEXT, size=size, color=X.INK),
-             after=gap_aside, answers=answers, tail=ASIDE_TAIL)
+    _aside(body, sheet, answers, gap_aside)
+
+
+def build_combined_sheet(page, body, answers, first_of_document, frames=True,
+                         gap_aside=GAP_ASIDE, frame_rects=None):
+    """one printed side: 訓読文 / 書き下し / 現代語訳, stacked (3 bands) --
+    for a poem short enough that both editions fit on a single page."""
+    _head_and_frame(body, page, answers, frames, frame_rects)
+    end_section(body, cols=1, nextpage=not first_of_document)
+
+    pitch = pitch_of(page['upper_size']) + GAP_UPPER
+    for markup in page['upper']:
+        if not fits_raw(markup, page['upper_size'], CBAND_TOP - BODY_TAIL):
+            print('  ! 上段からはみ出します（折り返します）:', X.plain(markup))
+        line(body, markup, dict(font=X.BRUSH, size=page['upper_size'],
+                                color=X.INK), after=GAP_UPPER, answers=answers,
+             tail=BODY_TAIL)
+    for i, markup in enumerate(page['mid']):
+        if markup is not None and not fits(markup, page['mid_size'],
+                                           CBAND_MID - BODY_TAIL):
+            print('  ! 中段からはみ出します（折り返します）:', X.plain(markup)[:20])
+        ruled_line(body, markup, page['mid_size'], answers, CBAND_MID,
+                   after=gap_for(page['mid_size'], pitch), colbreak=(i == 0))
+    for i, markup in enumerate(page['lower']):
+        if markup is not None and not fits(markup, page['lower_size'],
+                                           CBAND_BOT - BODY_TAIL):
+            print('  ! 下段からはみ出します（折り返します）:', X.plain(markup)[:20])
+        ruled_line(body, markup, page['lower_size'], answers, CBAND_BOT,
+                   after=gap_for(page['lower_size'], pitch), colbreak=(i == 0))
+    end_section(body, bands=[CBAND_TOP, CBAND_MID, CBAND_BOT])
+
+    _aside(body, page, answers, gap_aside)
 
 
 CT = '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
@@ -268,6 +347,13 @@ DOC_RELS = '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/settings" Target="settings.xml"/>
 </Relationships>'''
 
+# The document default carries a *tight, exact* fallback (10.5pt-ish pitch),
+# so a paragraph a teacher adds by hand later in Word -- which has no local
+# w:spacing override -- still lands close to our spacing instead of Word's
+# own roomy default (that mismatch, seen when a hand-edited copy came back
+# with every newly-typed line spaced wide, was the "行間が不自然に開く" bug).
+_DEFAULT_PITCH = pitch_of(10.5)
+
 STYLES = '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
 <w:docDefaults><w:rPrDefault><w:rPr>
@@ -275,11 +361,12 @@ STYLES = '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <w:color w:val="{ink}"/><w:sz w:val="21"/><w:szCs w:val="21"/>
 <w:lang w:val="en-US" w:eastAsia="ja-JP"/>
 </w:rPr></w:rPrDefault>
-<w:pPrDefault><w:pPr><w:spacing w:after="0" w:line="240" w:lineRule="auto"/>
+<w:pPrDefault><w:pPr><w:spacing w:after="0" w:line="{pitch}" w:lineRule="exact"/>
 <w:jc w:val="both"/></w:pPr></w:pPrDefault></w:docDefaults>
 <w:style w:type="paragraph" w:default="1" w:styleId="a"><w:name w:val="Normal"/>
+<w:pPr><w:spacing w:after="0" w:line="{pitch}" w:lineRule="exact"/></w:pPr>
 <w:qFormat/></w:style>
-</w:styles>'''.format(t=X.TEXT, ink=X.INK)
+</w:styles>'''.format(t=X.TEXT, ink=X.INK, pitch=_DEFAULT_PITCH)
 
 SETTINGS = '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
@@ -289,13 +376,17 @@ SETTINGS = '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 
 
 def write(sheets, path, answers, frames=True, gaps=None, rects=None):
+    """`sheets` is a list of page specs. A spec with a `mid` key is drawn as
+    a single combined (3-band) page; otherwise it is a normal 2-band sheet."""
     doc = X.document()
     body = sub(doc, 'body')
     for i, sh in enumerate(sheets):
-        build_sheet(body, sh, answers, first_of_document=(i == 0),
-                    frames=frames,
-                    gap_aside=(gaps or {}).get(i, GAP_ASIDE),
-                    frame_rects=(rects or {}).get(i))
+        kw = dict(frames=frames, gap_aside=(gaps or {}).get(i, GAP_ASIDE),
+                  frame_rects=(rects or {}).get(i))
+        if 'mid' in sh:
+            build_combined_sheet(sh, body, answers, first_of_document=(i == 0), **kw)
+        else:
+            build_sheet(body, sh, answers, first_of_document=(i == 0), **kw)
         if i < len(sheets) - 1:
             end_section(body, cols=1)
     body.append(sectpr(cols=1))
