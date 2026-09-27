@@ -126,29 +126,36 @@ def lower_fits(sheets):
     the answers stop lining up under the 訓読文 they belong to.
     """
     height = S.BAND_BOT - S.BODY_TAIL
-    return all(S.fits(m, sh['lower_size'], height)
-              for sh in sheets for m in sh['lower'] if m)
+    return all(S.fits(m, lower_size, height)
+              for sh in sheets for _, _, lower, lower_size in S._groups(sh)
+              for m in lower if m)
 
 
 def shrink_lower(sheets):
     """Shed size only from 書き下し／訳, the minimal fix for a line that
-    would otherwise wrap and throw off the alignment with 訓読文 above it."""
+    would otherwise wrap and throw off the alignment with 訓読文 above it.
+    A sheet with more than one group (書き下し and 訳 on the same page)
+    shrinks each group's own size independently."""
     changed = False
     height = S.BAND_BOT - S.BODY_TAIL
     for sh in sheets:
-        if all(S.fits(m, sh['lower_size'], height) for m in sh['lower'] if m):
-            continue
-        new = max(FLOORS['lower'], sh['lower_size'] - STEP)
-        if new != sh['lower_size']:
-            sh['lower_size'] = new
-            changed = True
+        new_groups = []
+        for upper, upper_size, lower, lower_size in S._groups(sh):
+            if not all(S.fits(m, lower_size, height) for m in lower if m):
+                new_size = max(FLOORS['lower'], lower_size - STEP)
+                if new_size != lower_size:
+                    lower_size = new_size
+                    changed = True
+            new_groups.append((upper, upper_size, lower, lower_size))
+        _set_groups(sh, new_groups)
     return changed
 
 
 def shrink(sheets):
     """Shed a little size everywhere text can wrap into more 行 than the page
     has room for -- notes and questions first (least noticeable), then
-    書き下し／訳, then the bold title. 本文 (訓読文) is never touched here."""
+    書き下し／訳ぶん (one group at a time), then the bold title. 本文
+    (訓読文) is never touched here."""
     changed = False
     for sh in sheets:
         new_qs = [(m, max(FLOORS['aside'], sz - STEP)) for m, sz in sh['questions']]
@@ -157,9 +164,16 @@ def shrink(sheets):
             sh['questions'], sh['notes'] = new_qs, new_ns
             changed = True
             continue
-        new = max(FLOORS['lower'], sh['lower_size'] - STEP)
-        if new != sh['lower_size']:
-            sh['lower_size'] = new
+        groups = S._groups(sh)
+        new_groups, shrunk = [], False
+        for upper, upper_size, lower, lower_size in groups:
+            new_size = max(FLOORS['lower'], lower_size - STEP)
+            if not shrunk and new_size != lower_size:
+                lower_size = new_size
+                shrunk = True
+            new_groups.append((upper, upper_size, lower, lower_size))
+        if shrunk:
+            _set_groups(sh, new_groups)
             changed = True
             continue
         new_head = [(m, (max(FLOORS['head_bold'], sz - STEP) if bold else sz), bold)
@@ -168,6 +182,15 @@ def shrink(sheets):
             sh['head'] = new_head
             changed = True
     return changed
+
+
+def _set_groups(sheet, groups):
+    """write shrunk group sizes back -- into `groups` if the sheet has one,
+    otherwise back into the plain `upper_size`/`lower_size` fields."""
+    if 'groups' in sheet:
+        sheet['groups'] = groups
+    else:
+        (_, sheet['upper_size'], _, sheet['lower_size']), = groups
 
 
 def main():

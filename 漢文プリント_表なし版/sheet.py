@@ -218,17 +218,30 @@ def n_lines(markup, size_pt, height):
     return total
 
 
+def _groups(sheet):
+    """the (upper, upper_size, lower, lower_size) 訓読文/書き下し(訳) groups
+    this sheet places side by side, right to left. Most sheets have exactly
+    one; a sheet that puts 書き下し and 現代語訳 on the same page (instead of
+    two separate sheets) supplies `groups` directly instead of a single
+    `upper`/`lower` pair -- each group repeats 訓読文 above its own ruled
+    band, so the two stay two bands each, never three stacked bands."""
+    if 'groups' in sheet:
+        return sheet['groups']
+    return [(sheet['upper'], sheet['upper_size'], sheet['lower'], sheet['lower_size'])]
+
+
 def estimate_sheet_width(sheet):
     """A cheap (no rendering) estimate of how much of the page a sheet asks
     for, so build.py can tell before ever calling LibreOffice whether it
     needs to shrink something to keep the sheet to the page(s) it should
-    take. Works for both the 2-band and the 3-band (combined) layout."""
+    take."""
     head_w = 0
     for markup, size, _ in sheet['head']:
         n = n_lines(markup.lstrip('@'), size, TEXT_H)
         head_w += n * pitch_of(size) + GAP_HEAD
-    pitch = pitch_of(sheet['upper_size']) + GAP_UPPER
-    body_w = pitch * len(sheet['upper'])
+    body_w = 0
+    for upper, upper_size, lower, lower_size in _groups(sheet):
+        body_w += (pitch_of(upper_size) + GAP_UPPER) * len(upper)
     aside_w = 0
     for markup, size in sheet['questions'] + sheet['notes']:
         n = n_lines(markup, size, TEXT_H - ASIDE_TAIL)
@@ -267,25 +280,32 @@ def _aside(body, sheet, answers):
 
 def build_sheet(body, sheet, answers, first_of_document, frames=True,
                 frame_rects=None):
-    """one printed side: 訓読文 above, 書き下し or 訳 below (2 bands)"""
+    """one printed side: one or more 訓読文/書き下し(訳) groups (2 bands
+    each), side by side, right to left, then 設問 and 語注."""
     _head_and_frame(body, sheet, answers, frames, frame_rects)
     end_section(body, cols=1, nextpage=not first_of_document)
 
-    # ---- 本文: 訓読文（上段、手を加えない） / 書き下し・訳（下段、罫線つき）
-    pitch = pitch_of(sheet['upper_size']) + GAP_UPPER
-    for markup in sheet['upper']:
-        if not fits_raw(markup, sheet['upper_size'], BAND_TOP - BODY_TAIL):
-            print('  ! 上段からはみ出します（折り返します）:', X.plain(markup))
-        line(body, markup, dict(font=X.BRUSH, size=sheet['upper_size'],
-                                color=X.INK), after=GAP_UPPER, answers=answers,
-             tail=BODY_TAIL)
-    for i, markup in enumerate(sheet['lower']):
-        if markup is not None and not fits(markup, sheet['lower_size'],
-                                           BAND_BOT - BODY_TAIL):
-            print('  ! 下段からはみ出します（折り返します）:', X.plain(markup)[:20])
-        ruled_line(body, markup, sheet['lower_size'], answers, BAND_BOT,
-                   after=gap_for(sheet['lower_size'], pitch), colbreak=(i == 0))
-    end_section(body, bands=[BAND_TOP, BAND_BOT])
+    # ---- 本文: 訓読文（上段、手を加えない） / 書き下し・訳（下段、罫線つき）。
+    # 組ごとに段組みの区切り（continuous な sectPr）を閉じてから次の組を
+    # 書く -- 1 つの区切りに全部まとめて詰め込もうとすると、Word 側が
+    # うまく列を割り振れずに紙面からあふれてしまうため、1 組だけの
+    # レイアウト（もとから正しく動くもの）をそのまま繰り返す形にしている。
+    groups = _groups(sheet)
+    for g, (upper, upper_size, lower, lower_size) in enumerate(groups):
+        pitch = pitch_of(upper_size) + GAP_UPPER
+        for markup in upper:
+            if not fits_raw(markup, upper_size, BAND_TOP - BODY_TAIL):
+                print('  ! 上段からはみ出します（折り返します）:', X.plain(markup))
+            line(body, markup, dict(font=X.BRUSH, size=upper_size,
+                                    color=X.INK), after=GAP_UPPER, answers=answers,
+                 tail=BODY_TAIL)
+        for i, markup in enumerate(lower):
+            if markup is not None and not fits(markup, lower_size,
+                                               BAND_BOT - BODY_TAIL):
+                print('  ! 下段からはみ出します（折り返します）:', X.plain(markup)[:20])
+            ruled_line(body, markup, lower_size, answers, BAND_BOT,
+                       after=gap_for(lower_size, pitch), colbreak=(i == 0))
+        end_section(body, bands=[BAND_TOP, BAND_BOT])
 
     _aside(body, sheet, answers)
 
