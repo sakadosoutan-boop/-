@@ -353,7 +353,7 @@ STYLES = '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 
 SETTINGS = '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
-<w:compat><w:compatSetting w:name="compatibilityMode"
+<w:compat><w:ulTrailSpace/><w:compatSetting w:name="compatibilityMode"
  w:uri="http://schemas.microsoft.com/office/word" w:val="15"/></w:compat>
 </w:settings>'''
 
