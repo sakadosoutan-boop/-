@@ -96,7 +96,10 @@ def frames(doc, sheets):
             return None
         # the heading and the notes both run the full height of the sheet, so
         # 本文 (both bands) is whatever lies between the two, full height
-        body = [g for g in glyphs if q_x + 2 < g['bbox'][0] < head_x - 2]
+        # by each glyph's centre, the same way `_columns` groups them -- by
+        # its left edge the name line itself would count as 本文
+        body = [g for g in glyphs
+                if q_x + 6 < (g['bbox'][0] + g['bbox'][2]) / 2 < head_x - 6]
         if not body:
             return None
         left = min(g['bbox'][0] for g in glyphs) * PT
@@ -136,9 +139,16 @@ def lower_fits(sheets):
     the answers stop lining up under the 訓読文 they belong to.
     """
     height = S.BAND_BOT - S.BODY_TAIL
-    return all(S.fits(m, lower_size, height)
-              for sh in sheets for _, _, lower, lower_size in S._groups(sh)
-              for m in lower if m)
+    return (all(S.fits(m, lower_size, height)
+                for sh in sheets for _, _, lower, lower_size in S._groups(sh)
+                for m in lower if m)
+            and all(_last_band_fits(sh) for sh in sheets if 'stack' in sh))
+
+
+def _last_band_fits(sheet):
+    """a `stack` sheet's last band (訳) is the only one not cut to fit"""
+    last, height = sheet['stack'][-1], S.stack_heights(sheet)[-1] - S.BODY_TAIL
+    return all(S.fits(m, last['size'], height) for m in last['lines'] if m)
 
 
 def shrink_lower(sheets):
@@ -149,6 +159,12 @@ def shrink_lower(sheets):
     changed = False
     height = S.BAND_BOT - S.BODY_TAIL
     for sh in sheets:
+        if 'stack' in sh and not _last_band_fits(sh):
+            last = sh['stack'][-1]
+            new = max(FLOORS['lower'], last['size'] - STEP)
+            if new != last['size']:
+                last['size'] = new
+                changed = True
         new_groups = []
         for upper, upper_size, lower, lower_size in S._groups(sh):
             if not all(S.fits(m, lower_size, height) for m in lower if m):
@@ -197,6 +213,8 @@ def shrink(sheets):
 def _set_groups(sheet, groups):
     """write shrunk group sizes back -- into `groups` if the sheet has one,
     otherwise back into the plain `upper_size`/`lower_size` fields."""
+    if not groups:
+        return
     if 'groups' in sheet:
         sheet['groups'] = groups
     else:
@@ -250,7 +268,18 @@ def main():
 
     for suffix, answers in (('解答版', True), ('生徒版', False)):
         out = os.path.join(outdir, '%s_%s.docx' % (name, suffix))
-        S.write(sheets, out, answers, frames=want_frames, rects=rects)
+        edition_rects = rects
+        if rects and not answers:
+            # the blanks run longer than the answers they hide, so the
+            # student edition's blocks sit a little further left -- measure
+            # it on its own rather than reuse the answer key's frames
+            S.write(sheets, out, answers, frames=False)
+            sdoc = render(out)
+            if sdoc and len(sdoc) == len(sheets):
+                edition_rects = frames(sdoc, sheets) or rects
+                if not laid_out(sdoc, sheets):
+                    print('  ! 生徒版で語注が左の余白にはみ出しています')
+        S.write(sheets, out, answers, frames=want_frames, rects=edition_rects)
         print('wrote', out)
     if want_frames and rects is None:
         print('  （枠は既定の位置です。LibreOffice があれば実測して合わせます）')

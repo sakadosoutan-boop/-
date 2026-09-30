@@ -71,12 +71,14 @@ def body_pitch(upper_size, lower_size):
 ZWSP = '\u200b'
 
 
-def strut(p, upper_size, lower_size):
-    """the blank that gives every 本文 line the same width (see GAP_BODY)"""
-    upper = dict(font=X.BRUSH, size=upper_size, color=X.INK)
-    X.ruby(p, ZWSP, ZWSP, **upper)
-    X.kaeriten(p, ZWSP, **upper)
-    X.ruby(p, ZWSP, ZWSP, font=X.TEXT, size=lower_size, color=X.INK)
+def strut(p, styles):
+    """the blank that gives every 本文 line the same width (see GAP_BODY):
+    one zero-width ruby for each band's (font, size, has 返り点) style"""
+    for font, size, kaeri in styles:
+        st = dict(font=font, size=size, color=X.INK)
+        X.ruby(p, ZWSP, ZWSP, **st)
+        if kaeri:
+            X.kaeriten(p, ZWSP, **st)
 
 
 # 段落後の間隔 -- in vertical writing, horizontal space to the left of a 行.
@@ -124,7 +126,7 @@ BODY_TAIL = 170                    # 3mm, likewise for the poem and the answers
 
 
 def para(body, size, after=0, before=0, colbreak=False, bottom=False, tail=0,
-         box=None):
+         box=None, tabs=()):
     """One paragraph at Word's default 「1 行」 spacing.
 
     `after` is 段落後の間隔 -- in vertical writing that is horizontal space to
@@ -144,6 +146,10 @@ def para(body, size, after=0, before=0, colbreak=False, bottom=False, tail=0,
         for side in ('top', 'left', 'bottom', 'right', 'between'):
             bd.append(el(side, val='single', sz=4, space=1, color=box))
         pr.append(bd)
+    if tabs:
+        ts = sub(pr, 'tabs')
+        for pos in tabs:
+            sub(ts, 'tab', val='left', pos=int(pos))
     pr.append(el('spacing', before=before, after=after,
                  line=240, lineRule='auto'))
     if tail:
@@ -182,7 +188,7 @@ def ruled_line(body, markup, size, answers, band, after=0, colbreak=False,
     n = max(2, room - used)
     X.run(p, '　' * n, **style)
     if strut_of:
-        strut(p, *strut_of)
+        strut(p, strut_of)
     return p
 
 
@@ -244,6 +250,8 @@ def _groups(sheet):
     two separate sheets) supplies `groups` directly instead of a single
     `upper`/`lower` pair -- each group repeats 訓読文 above its own ruled
     band, so the two stay two bands each, never three stacked bands."""
+    if 'stack' in sheet:
+        return []
     if 'groups' in sheet:
         return sheet['groups']
     return [(sheet['upper'], sheet['upper_size'], sheet['lower'], sheet['lower_size'])]
@@ -261,6 +269,11 @@ def estimate_sheet_width(sheet):
     body_w = 0
     for upper, upper_size, lower, lower_size in _groups(sheet):
         body_w += body_pitch(upper_size, lower_size) * len(upper)
+    if 'stack' in sheet:
+        bands = sheet['stack']
+        widest = max(b['size'] for b in bands) * 20
+        pitch = int(round(widest * (LINE_FACTOR + X.RUBY_RATIO)))   # 行間なし
+        body_w += pitch * len(bands[0]['lines'])
     aside_w = 0
     for markup, size in sheet['questions'] + sheet['notes']:
         n = n_lines(markup, size, TEXT_H - ASIDE_TAIL)
@@ -288,6 +301,11 @@ def _head_and_frame(body, sheet, answers, frames, frame_rects):
     if frames and frame_rects:
         for i, (x0, y0, x1, y1) in enumerate(frame_rects, 1):
             X.shape(first, x0, y0, x1 - x0, y1 - y0, i)
+        if 'stack' in sheet:
+            x0, _, x1, _ = frame_rects[0]
+            for j, (x, y, w, h) in enumerate(band_rules(sheet, x0, x1)):
+                X.shape(first, x, y, w, h, len(frame_rects) + 1 + j,
+                        color=X.RULE, weight=9525, radius=0)
 
 
 def _aside(body, sheet, answers):
@@ -295,6 +313,59 @@ def _aside(body, sheet, answers):
     for markup, size in sheet['questions'] + sheet['notes']:
         line(body, markup, dict(font=X.TEXT, size=size, color=X.INK),
              after=GAP_ASIDE, answers=answers, tail=ASIDE_TAIL)
+
+
+def stack_heights(sheet):
+    """band heights (twips) for a `stack` sheet: every band but the last is
+    cut to just fit its longest line, and the last band gets what is left"""
+    bands = sheet['stack']
+    heights = []
+    for b in bands[:-1]:
+        longest = max(X.advance(m) for m in b['lines'] if m)
+        heights.append(int(longest * b['size'] * 20 * SAFETY) + 1 + BODY_TAIL)
+    heights.append(TEXT_H - sum(heights) - BAND_GAP * (len(bands) - 1))
+    return heights
+
+
+def _stack(body, sheet, answers):
+    """本文 as bands stacked top to bottom (訓読文 / 書き下し / 訳 ...).
+
+    Each 句 is ONE paragraph -- one 行 -- holding all its bands, with a tab
+    stop at the top of every band after the first. Its parts therefore can
+    never drift apart, whatever font or line spacing Word uses; the bands are
+    just tab positions along the 行. Each 行 is boxed (a paragraph border, so
+    it survives retyping), and `band_rules` draws the lines between bands.
+    `sheet['stack']` lists the bands, top first: {'lines', 'size', 'brush'
+    (訓読文の楷書体)}; every band after the first is printed red, like the
+    answer bands of the 2-band sheets."""
+    bands = sheet['stack']
+    heights = stack_heights(sheet)
+    stops = []
+    for h in heights[:-1]:
+        stops.append((stops[-1] if stops else 0) + h + BAND_GAP)
+    for k, b in enumerate(bands):
+        for m in b['lines']:
+            if m and not fits(m, b['size'], heights[k] - BODY_TAIL):
+                print('  ! %d 段目からはみ出します:' % (k + 1), X.plain(m)[:20])
+    for i in range(len(bands[0]['lines'])):
+        p = para(body, max(b['size'] for b in bands), tail=BODY_TAIL,
+                 box=X.RULE, tabs=stops)
+        for k, b in enumerate(bands):
+            if k:
+                sub(sub(p, 'r'), 'tab')
+            style = dict(font=X.BRUSH if b.get('brush') else X.TEXT,
+                         size=b['size'], color=X.RED if k else X.INK)
+            X.emit(p, b['lines'][i] or '', style, show_answers=answers)
+    end_section(body, cols=1)
+
+
+def band_rules(sheet, x0, x1):
+    """(x, y, w, h) of the thin lines between a stack sheet's bands"""
+    rules, y = [], M_TOP
+    for h in stack_heights(sheet)[:-1]:
+        y += h + BAND_GAP
+        rules.append((x0, y - BAND_GAP // 2, x1 - x0, 0))
+    return rules
 
 
 def build_sheet(body, sheet, answers, first_of_document, frames=True,
@@ -309,22 +380,24 @@ def build_sheet(body, sheet, answers, first_of_document, frames=True,
     # 書く -- 1 つの区切りに全部まとめて詰め込もうとすると、Word 側が
     # うまく列を割り振れずに紙面からあふれてしまうため、1 組だけの
     # レイアウト（もとから正しく動くもの）をそのまま繰り返す形にしている。
-    groups = _groups(sheet)
-    for upper, upper_size, lower, lower_size in groups:
+    if 'stack' in sheet:
+        _stack(body, sheet, answers)
+    for upper, upper_size, lower, lower_size in _groups(sheet):
+        styles = [(X.BRUSH, upper_size, True), (X.TEXT, lower_size, False)]
         for markup in upper:
             if not fits_raw(markup, upper_size, BAND_TOP - BODY_TAIL):
                 print('  ! 上段からはみ出します（折り返します）:', X.plain(markup))
             p = line(body, markup, dict(font=X.BRUSH, size=upper_size,
                                         color=X.INK), after=GAP_BODY,
                      answers=answers, tail=BODY_TAIL)
-            strut(p, upper_size, lower_size)
+            strut(p, styles)
         for i, markup in enumerate(lower):
             if markup is not None and not fits(markup, lower_size,
                                                BAND_BOT - BODY_TAIL):
                 print('  ! 下段からはみ出します（折り返します）:', X.plain(markup)[:20])
             ruled_line(body, markup, lower_size, answers, BAND_BOT,
                        after=GAP_BODY, colbreak=(i == 0),
-                       strut_of=(upper_size, lower_size))
+                       strut_of=styles)
         end_section(body, bands=[BAND_TOP, BAND_BOT])
 
     _aside(body, sheet, answers)

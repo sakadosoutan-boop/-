@@ -61,8 +61,9 @@ def sub(parent, tag, **attrs):
 
 
 # ------------------------------------------------------------------ runs
-def rpr(font=TEXT, size=21, color=INK, bold=False, underline=None):
-    """size is in points; Word stores half-points."""
+def rpr(font=TEXT, size=21, color=INK, bold=False, underline=None, squeeze=0):
+    """size is in points; Word stores half-points. `squeeze` narrows the
+    character spacing by that many twips (文字間隔「狭く」)."""
     pr = el('rPr')
     f = el('rFonts')
     for a in ('ascii', 'eastAsia', 'hAnsi', 'cs'):
@@ -72,6 +73,8 @@ def rpr(font=TEXT, size=21, color=INK, bold=False, underline=None):
         pr.append(el('b'))
         pr.append(el('bCs'))
     pr.append(el('color', val=color))
+    if squeeze:
+        pr.append(el('spacing', val=-int(squeeze)))
     pr.append(el('sz', val=int(round(size * 2))))
     pr.append(el('szCs', val=int(round(size * 2))))
     if underline:
