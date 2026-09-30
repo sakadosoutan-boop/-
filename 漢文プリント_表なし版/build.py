@@ -114,6 +114,16 @@ STEP = 0.3          # pt shed per shrink step
 FLOORS = {'aside': 8.0, 'lower': 8.0, 'head_bold': 10.5}
 
 
+def laid_out(doc, sheets):
+    """right number of pages, and nothing past the left margin -- the notes
+    grow leftward, so that is the edge that overflows first"""
+    if len(doc) != len(sheets):
+        return False
+    edge = (S.M_LR - 20) / PT
+    return all(not glyphs or min(g['bbox'][0] for g in glyphs) >= edge
+               for glyphs in (_glyphs(page, minsz=0) for page in doc))
+
+
 def fits_budget(sheets):
     return all(S.estimate_sheet_width(sh) <= S.TEXT_W - S.SLACK for sh in sheets)
 
@@ -221,8 +231,8 @@ def main():
     # still spill onto another page once actually laid out -- shrink further
     # if that happens
     render_tries = 0
-    while (doc is not None and len(doc) != len(sheets)
-           and render_tries < 8 and shrink(sheets)):
+    while (doc is not None and not laid_out(doc, sheets)
+           and render_tries < 12 and shrink(sheets)):
         render_tries += 1
         S.write(sheets, probe, True, frames=False)
         doc = render(probe)
@@ -235,6 +245,8 @@ def main():
     if doc and len(doc) != len(sheets):
         print('  ! %d ページになりました（%d 枚のはずです）。語注か設問を短くしてください'
               % (len(doc), len(sheets)))
+    elif doc and not laid_out(doc, sheets):
+        print('  ! 語注が左の余白にはみ出しています。語注か設問を短くしてください')
 
     for suffix, answers in (('解答版', True), ('生徒版', False)):
         out = os.path.join(outdir, '%s_%s.docx' % (name, suffix))

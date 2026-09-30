@@ -8,17 +8,11 @@ bands:
     [見出し・記名] [訓読文 / 書き下し(訳)の2段] [設問] [語注]
      ← 1段        ← 2段組み                    ← 1段   ← 1段
 
-Every paragraph is given an *exact* line pitch (`lineRule="exact"`), not
-Word's "1 行" auto spacing. Auto spacing is computed from whatever font is
-actually installed, so the same file measures differently on this preview
-(LibreOffice + substitute fonts) and in a teacher's Word (the real UD デジタ
-ル教科書体 N / HG正楷書体-PRO) -- which is what made the old auto-spaced
-sheets drift and, once a paragraph lost its explicit override (e.g. a line
-added by hand in Word, which falls back to the document default), balloon
-open. Exact spacing is a fixed number of twips regardless of font, so a
-sheet that fits here fits in Word too, and a hand-added paragraph that
-happens to lose its override still falls back to a *tight* default (set in
-STYLES below) instead of Word's roomy one.
+Every paragraph uses Word's default line spacing, 「1 行」 (`line="240"
+lineRule="auto"`). An exact (固定値) pitch looked tidy on paper but Word
+clips anything taller than the pitch -- ruby readings and the larger 訓読文
+characters came out cut off -- so the only spacing set here is 段落後の
+間隔, the gap between 行.
 
 設問・語注 used to have their 段落後の間隔 (the gap between 行) stretched
 out to make the block reach the left margin -- but that stretch is exactly
@@ -44,37 +38,62 @@ BAND_TOP = 3402                    # 訓読文 band, 60mm (2-band sheet)
 BAND_GAP = 284                     # 5mm, between any two stacked bands
 BAND_BOT = TEXT_H - BAND_TOP - BAND_GAP    # 書き下し / 訳 band, 112mm
 
-# Every paragraph's line spacing is exact -- a fixed number of twips per
-# character, chosen once here rather than measured off whatever font happens
-# to be installed. 1.45x the point size matches the density the previous
-# (auto-spaced) sheets already had -- this is not new "extra" room, just the
-# same density made deterministic; 段落後の間隔 (below) is the visible gap
-# between 行, and is what actually reads as "line spacing" to a teacher.
+# How wide one 行 comes out at 「1 行」 spacing, as a multiple of the point
+# size. Only an estimate for fitting the sheet to the page -- Word measures
+# the real thing from the font -- and the LibreOffice render in build.py is
+# the check that the estimate held.
 LINE_FACTOR = 1.45
 
 
 def pitch_of(size_pt):
-    """the exact twips-per-character height for a run at this point size"""
+    """estimated width of one 行 at this point size, in twips"""
     return int(round(size_pt * 20 * LINE_FACTOR))
+
+
+# 本文 (訓読文 above, 書き下し・訳 below): at 「1 行」 spacing a 行 is as wide
+# as the biggest thing on it, so a 訓読文 line (large brush font, ruby, 返り点)
+# and a 書き下し line (smaller font, its own ruby) come out different widths
+# and the answer boxes drift out from under their 句. Every 本文 line
+# therefore carries the same blank "strut" -- one blank in each band's style,
+# with that band's ruby -- so all of them are exactly as wide as the widest,
+# whatever font Word actually uses. GAP_BODY then spaces them evenly.
+GAP_BODY = 170                     # 本文 (3mm)
+
+
+def body_pitch(upper_size, lower_size):
+    """estimated width of one 本文 行 (strut included), in twips"""
+    widest = max(upper_size, lower_size) * 20
+    return int(round(widest * (LINE_FACTOR + X.RUBY_RATIO))) + GAP_BODY
+
+
+# zero-width, so the strut sets how wide a 行 is without taking up any of
+# its length
+ZWSP = '\u200b'
+
+
+def strut(p, upper_size, lower_size):
+    """the blank that gives every 本文 line the same width (see GAP_BODY)"""
+    upper = dict(font=X.BRUSH, size=upper_size, color=X.INK)
+    X.ruby(p, ZWSP, ZWSP, **upper)
+    X.kaeriten(p, ZWSP, **upper)
+    X.ruby(p, ZWSP, ZWSP, font=X.TEXT, size=lower_size, color=X.INK)
 
 
 # 段落後の間隔 -- in vertical writing, horizontal space to the left of a 行.
 # Kept tight: this is what "行間" means when a teacher says the sheet looks
-# too loose, and it is independent of each 行's own (now-fixed) line pitch.
+# too loose.
 GAP_HEAD = 140                     # 見出し・記名 (2.5mm)
-GAP_UPPER = 170                    # 訓読文 (3mm)
 GAP_ASIDE = 170                    # 語注・設問 -- 他と同じ、普通の行間 (3mm)
 
-# A small residual margin, not for font-metric drift (exact spacing already
-# removes that) but for `advance()`'s own estimate of how much room a ruby
+# A small residual margin for `advance()`'s own estimate of how much room a ruby
 # reading or a 返り点 needs -- a model, not a measurement.
 SAFETY = 1.05
 
 FRAME_PAD = 110                        # twips of air between text and frame
 FRAME_GAP = 50                         # twips left clear between two frames
 
-# Each section's first and last line come out a little wider than the exact
-# pitch asks for, and there are three sections on a sheet. Hold that much
+# Each section's first and last line come out a little wider than the
+# estimate, and there are three sections on a sheet. Hold that much
 # back so the sheet still fits on one page.
 SLACK = 700                            # twips
 
@@ -96,8 +115,6 @@ def sectpr(cols=1, bands=None, continuous=True, nextpage=False):
     else:
         sp.append(el('cols', num=cols, space=BAND_GAP, equalWidth=1))
     sp.append(el('textDirection', val='tbRl'))
-    # no line grid: the grid would snap every line to its own pitch and
-    # override the exact spacing each block asks for
     sp.append(el('docGrid', type='default', linePitch=360, charSpace=0))
     return sp
 
@@ -108,7 +125,7 @@ BODY_TAIL = 170                    # 3mm, likewise for the poem and the answers
 
 def para(body, size, after=0, before=0, colbreak=False, bottom=False, tail=0,
          box=None):
-    """One paragraph at an exact line pitch for `size` (see `pitch_of`).
+    """One paragraph at Word's default 「1 行」 spacing.
 
     `after` is 段落後の間隔 -- in vertical writing that is horizontal space to
     the left of this line. `bottom` sets 下詰め and `tail` keeps that much of
@@ -123,12 +140,12 @@ def para(body, size, after=0, before=0, colbreak=False, bottom=False, tail=0,
     pr = sub(p, 'pPr')
     if box:
         bd = el('pBdr')
-        for side in ('top', 'left', 'bottom', 'right'):
+        # `between` draws the rule where Word merges touching boxes into one
+        for side in ('top', 'left', 'bottom', 'right', 'between'):
             bd.append(el(side, val='single', sz=4, space=1, color=box))
         pr.append(bd)
-    pr.append(el('snapToGrid', val=0))
     pr.append(el('spacing', before=before, after=after,
-                 line=pitch_of(size), lineRule='exact'))
+                 line=240, lineRule='auto'))
     if tail:
         pr.append(el('ind', right=tail))
     if bottom:
@@ -145,7 +162,8 @@ def line(body, markup, style, after=0, colbreak=False, answers=True, **kw):
     return p
 
 
-def ruled_line(body, markup, size, answers, band, after=0, colbreak=False):
+def ruled_line(body, markup, size, answers, band, after=0, colbreak=False,
+               strut_of=None):
     """A writing line boxed the full depth of its band -- a ruled box the
     student writes the answer into, the whole way down. Both editions get
     the same box (padded with blank characters to a uniform depth), so a
@@ -163,13 +181,20 @@ def ruled_line(body, markup, size, answers, band, after=0, colbreak=False):
     room = max(1, int((band - BODY_TAIL) // (size * 20)) - 1)
     n = max(2, room - used)
     X.run(p, '　' * n, **style)
+    if strut_of:
+        strut(p, *strut_of)
     return p
 
 
 def end_section(body, **kw):
     p = sub(body, 'p')
     pr = sub(p, 'pPr')
-    pr.append(el('spacing', after=0, line=20, lineRule='exact'))
+    pr.append(el('spacing', after=0, line=240, lineRule='auto'))
+    # the empty paragraph that carries a section break still takes up one
+    # 行 at 「1 行」 spacing; a 1pt paragraph mark keeps that 行 hairline-thin
+    mark = sub(pr, 'rPr')
+    sub(mark, 'sz', val=2)
+    sub(mark, 'szCs', val=2)
     pr.append(sectpr(**kw))
     return p
 
@@ -178,18 +203,12 @@ def end_section(body, **kw):
 FRAME = '8FA3C4'                   # the colour the decorative frames are drawn in
 
 
-def gap_for(size_pt, pitch):
-    """段落後の間隔 that puts a line of this size on the given pitch"""
-    return max(0, pitch - pitch_of(size_pt))
-
-
 def fits(markup, size_pt, height):
     """does this line stay inside its band, or will it wrap?
 
     A run of characters that never wraps advances at its own glyph size
-    (measured: exactly 1.0x the point size, unaffected by this paragraph's
-    exact line pitch -- that pitch only governs the gap *between* separate
-    行, not the density of characters within one unbroken run). SAFETY pads
+    (measured: 1.0x the point size, whatever the paragraph's line spacing --
+    that only governs the gap *between* separate 行). SAFETY pads
     only the residual uncertainty in `advance()`'s own model of how much
     room a ruby reading or a 返り点 needs.
     """
@@ -241,7 +260,7 @@ def estimate_sheet_width(sheet):
         head_w += n * pitch_of(size) + GAP_HEAD
     body_w = 0
     for upper, upper_size, lower, lower_size in _groups(sheet):
-        body_w += (pitch_of(upper_size) + GAP_UPPER) * len(upper)
+        body_w += body_pitch(upper_size, lower_size) * len(upper)
     aside_w = 0
     for markup, size in sheet['questions'] + sheet['notes']:
         n = n_lines(markup, size, TEXT_H - ASIDE_TAIL)
@@ -291,20 +310,21 @@ def build_sheet(body, sheet, answers, first_of_document, frames=True,
     # うまく列を割り振れずに紙面からあふれてしまうため、1 組だけの
     # レイアウト（もとから正しく動くもの）をそのまま繰り返す形にしている。
     groups = _groups(sheet)
-    for g, (upper, upper_size, lower, lower_size) in enumerate(groups):
-        pitch = pitch_of(upper_size) + GAP_UPPER
+    for upper, upper_size, lower, lower_size in groups:
         for markup in upper:
             if not fits_raw(markup, upper_size, BAND_TOP - BODY_TAIL):
                 print('  ! 上段からはみ出します（折り返します）:', X.plain(markup))
-            line(body, markup, dict(font=X.BRUSH, size=upper_size,
-                                    color=X.INK), after=GAP_UPPER, answers=answers,
-                 tail=BODY_TAIL)
+            p = line(body, markup, dict(font=X.BRUSH, size=upper_size,
+                                        color=X.INK), after=GAP_BODY,
+                     answers=answers, tail=BODY_TAIL)
+            strut(p, upper_size, lower_size)
         for i, markup in enumerate(lower):
             if markup is not None and not fits(markup, lower_size,
                                                BAND_BOT - BODY_TAIL):
                 print('  ! 下段からはみ出します（折り返します）:', X.plain(markup)[:20])
             ruled_line(body, markup, lower_size, answers, BAND_BOT,
-                       after=gap_for(lower_size, pitch), colbreak=(i == 0))
+                       after=GAP_BODY, colbreak=(i == 0),
+                       strut_of=(upper_size, lower_size))
         end_section(body, bands=[BAND_TOP, BAND_BOT])
 
     _aside(body, sheet, answers)
@@ -330,12 +350,6 @@ DOC_RELS = '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/settings" Target="settings.xml"/>
 </Relationships>'''
 
-# The document default carries a *tight, exact* fallback (10.5pt-ish pitch),
-# so a paragraph a teacher adds by hand later in Word -- which has no local
-# w:spacing override -- still lands close to our spacing instead of Word's
-# own roomy default (that mismatch, seen when a hand-edited copy came back
-# with every newly-typed line spaced wide, was the "行間が不自然に開く" bug).
-_DEFAULT_PITCH = pitch_of(10.5)
 
 STYLES = '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
@@ -344,12 +358,12 @@ STYLES = '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <w:color w:val="{ink}"/><w:sz w:val="21"/><w:szCs w:val="21"/>
 <w:lang w:val="en-US" w:eastAsia="ja-JP"/>
 </w:rPr></w:rPrDefault>
-<w:pPrDefault><w:pPr><w:spacing w:after="0" w:line="{pitch}" w:lineRule="exact"/>
+<w:pPrDefault><w:pPr><w:spacing w:after="0" w:line="240" w:lineRule="auto"/>
 <w:jc w:val="both"/></w:pPr></w:pPrDefault></w:docDefaults>
 <w:style w:type="paragraph" w:default="1" w:styleId="a"><w:name w:val="Normal"/>
-<w:pPr><w:spacing w:after="0" w:line="{pitch}" w:lineRule="exact"/></w:pPr>
+<w:pPr><w:spacing w:after="0" w:line="240" w:lineRule="auto"/></w:pPr>
 <w:qFormat/></w:style>
-</w:styles>'''.format(t=X.TEXT, ink=X.INK, pitch=_DEFAULT_PITCH)
+</w:styles>'''.format(t=X.TEXT, ink=X.INK)
 
 SETTINGS = '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
