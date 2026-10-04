@@ -333,11 +333,10 @@ def _stack(body, sheet, answers):
     Each 句 is ONE paragraph -- one 行 -- holding all its bands, with a tab
     stop at the top of every band after the first. Its parts therefore can
     never drift apart, whatever font or line spacing Word uses; the bands are
-    just tab positions along the 行. Each 行 is boxed (a paragraph border, so
-    it survives retyping), and `band_rules` draws the lines between bands.
-    `sheet['stack']` lists the bands, top first: {'lines', 'size', 'brush'
-    (訓読文の楷書体)}; every band after the first is printed red, like the
-    answer bands of the 2-band sheets."""
+    just tab positions along the 行. `sheet['stack']` lists the bands, top
+    first: {'lines', 'size', 'brush' (訓読文の楷書体), 'ruled' (縦の罫線)};
+    every band after the first is printed red, like the answer bands of the
+    2-band sheets. `band_rules` draws the lines between bands."""
     bands = sheet['stack']
     heights = stack_heights(sheet)
     stops = []
@@ -347,16 +346,68 @@ def _stack(body, sheet, answers):
         for m in b['lines']:
             if m and not fits(m, b['size'], heights[k] - BODY_TAIL):
                 print('  ! %d 段目からはみ出します:' % (k + 1), X.plain(m)[:20])
+    rule = _rule_stops(bands, stops)
+    _rule(body, rule)
     for i in range(len(bands[0]['lines'])):
-        p = para(body, max(b['size'] for b in bands), tail=BODY_TAIL,
-                 box=X.RULE, tabs=stops)
+        p = para(body, max(b['size'] for b in bands), tail=BODY_TAIL, tabs=stops)
         for k, b in enumerate(bands):
             if k:
                 sub(sub(p, 'r'), 'tab')
             style = dict(font=X.BRUSH if b.get('brush') else X.TEXT,
                          size=b['size'], color=X.RED if k else X.INK)
             X.emit(p, b['lines'][i] or '', style, show_answers=answers)
+        _rule(body, rule)
     end_section(body, cols=1)
+
+
+RULE_SIZE = 3          # pt: how thick the hairline 行 between 句 is
+RULE_INK = '8FA3C4'
+
+
+def _rule_stops(bands, stops):
+    """(position, leader) tab stops for a `_rule` line: a ruled band's
+    stretch is drawn (an underscore leader), everything else left blank"""
+    starts = [0] + stops
+    out = []
+    for k, b in enumerate(bands):
+        if k:
+            out.append((starts[k], None))
+        end = starts[k + 1] - BAND_GAP if k + 1 < len(bands) else TEXT_H - BODY_TAIL
+        out.append((end, 'underscore' if b.get('ruled') else None))
+    return out
+
+
+def _rule(body, rule):
+    """the vertical rule between two 句: a hairline paragraph of nothing but
+    tabs, whose leaders draw the line along the ruled bands only. A
+    paragraph border could not do this -- it always runs the whole 行,
+    訓読文 included."""
+    def small(parent):
+        rp = sub(parent, 'rPr')
+        f = sub(rp, 'rFonts')
+        for a in ('ascii', 'eastAsia', 'hAnsi', 'cs'):
+            f.set(W + a, X.TEXT)
+        sub(rp, 'color', val=RULE_INK)
+        sub(rp, 'sz', val=RULE_SIZE * 2)
+        sub(rp, 'szCs', val=RULE_SIZE * 2)
+    p = sub(body, 'p')
+    pr = sub(p, 'pPr')
+    ts = sub(pr, 'tabs')
+    for pos, leader in rule:
+        t = sub(ts, 'tab', val='left', pos=int(pos))
+        if leader:
+            t.set(W + 'leader', leader)
+    pr.append(el('spacing', before=0, after=0, line=240, lineRule='auto'))
+    small(pr)
+    # a zero-width character at the hairline size: without any text, the
+    # line would take the height of the document's default font instead
+    r = sub(p, 'r')
+    small(r)
+    sub(r, 't').text = ZWSP
+    for _ in rule:
+        r = sub(p, 'r')
+        small(r)
+        sub(r, 'tab')
 
 
 def band_rules(sheet, x0, x1):
